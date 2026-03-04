@@ -16,16 +16,18 @@ import numpy as np
 import time
 import sys
 import os
+import threading
 
 BASE = os.path.join(os.path.dirname(__file__), "public")
 MARKER1_PATH = os.path.join(BASE, "marker.png")
 MARKER2_PATH = os.path.join(BASE, "marker2.png")
 VIDEO_PATH   = os.path.join(BASE, "0213.mp4")
 
-THRESHOLD        = 0.75  # Порог совпадения маркера (0–1)
-DEBOUNCE_FRAMES  = 3     # Сколько кадров подряд должен быть виден маркер
+THRESHOLD       = 0.75  # Порог совпадения маркера (0–1)
+DEBOUNCE_FRAMES = 3     # Сколько кадров подряд должен быть виден маркер
+DETECT_SCALE    = 0.25  # Масштаб кадра для template matching (1920→480, 1080→270)
+DETECT_EVERY_N  = 3     # Проверять маркер раз в N кадров захвата
 
-# X-смещение второго монитора (можно передать аргументом)
 MONITOR_X_OFFSET = int(sys.argv[1]) if len(sys.argv) > 1 else 1440
 
 STATE_LIVE  = "live"
@@ -48,16 +50,64 @@ def find_capture_device(skip_first: bool = False):
     return None, -1
 
 
-def marker_found(gray_frame, marker, threshold):
-    """Возвращает True если маркер найден в кадре."""
-    if marker is None or gray_frame is None:
+def marker_found(small_gray, marker_small, threshold):
+    """Возвращает True если маркер найден в уменьшенном кадре."""
+    if marker_small is None or small_gray is None:
         return False
-    if (gray_frame.shape[0] < marker.shape[0] or
-            gray_frame.shape[1] < marker.shape[1]):
+    if (small_gray.shape[0] < marker_small.shape[0] or
+            small_gray.shape[1] < marker_small.shape[1]):
         return False
-    res = cv2.matchTemplate(gray_frame, marker, cv2.TM_CCOEFF_NORMED)
+    res = cv2.matchTemplate(small_gray, marker_small, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, _ = cv2.minMaxLoc(res)
     return max_val >= threshold
+
+
+def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event):
+    """
+    Поток захвата: читает кадры с карты захвата, обнаруживает маркеры.
+    Не блокирует главный поток — display и video работают независимо.
+    """
+    frame_count = 0
+    debounce_count = 0
+
+    while not stop_event.is_set():
+        ret, frame = cap_live.read()
+        if not ret:
+            time.sleep(0.01)
+            continue
+
+        # Сохраняем последний живой кадр для отображения
+        shared["live_frame"] = frame
+        frame_count += 1
+
+        # Template matching только раз в DETECT_EVERY_N кадров
+        if frame_count % DETECT_EVERY_N != 0:
+            continue
+
+        small = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
+        gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+        state = shared["state"]
+
+        if state == STATE_LIVE:
+            if marker_found(gray_small, marker1_small, THRESHOLD):
+                debounce_count += 1
+                if debounce_count >= DEBOUNCE_FRAMES:
+                    print("marker.png найден → воспроизведение 0213.mp4")
+                    shared["state"] = STATE_VIDEO
+                    shared["video_restart"] = True
+                    debounce_count = 0
+            else:
+                debounce_count = 0
+        else:  # STATE_VIDEO
+            if marker_found(gray_small, marker2_small, THRESHOLD):
+                debounce_count += 1
+                if debounce_count >= DEBOUNCE_FRAMES:
+                    print("marker2.png найден → возврат к живому видео")
+                    shared["state"] = STATE_LIVE
+                    debounce_count = 0
+            else:
+                debounce_count = 0
 
 
 def main():
@@ -70,17 +120,22 @@ def main():
     if marker2 is None:
         print(f"Ошибка: не найден маркер {MARKER2_PATH}")
         sys.exit(1)
-    print(f"Маркер 1: {marker1.shape[1]}x{marker1.shape[0]} px")
-    print(f"Маркер 2: {marker2.shape[1]}x{marker2.shape[0]} px")
+
+    # Уменьшаем маркеры пропорционально DETECT_SCALE
+    marker1_small = cv2.resize(marker1, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
+    marker2_small = cv2.resize(marker2, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
+    print(f"Маркер 1: {marker1.shape[1]}x{marker1.shape[0]} → {marker1_small.shape[1]}x{marker1_small.shape[0]} px")
+    print(f"Маркер 2: {marker2.shape[1]}x{marker2.shape[0]} → {marker2_small.shape[1]}x{marker2_small.shape[0]} px")
 
     # --- Карта захвата ---
     print("Поиск устройства захвата...")
     cap_live, dev_idx = find_capture_device(skip_first=False)
     if cap_live is None:
-        print("Ошибка: карта захвата не найдена. Укажите индекс: python full_test.py <x_offset> <device_index>")
+        print("Ошибка: карта захвата не найдена.")
         sys.exit(1)
     cap_live.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap_live.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    cap_live.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # минимальный буфер → всегда свежий кадр
 
     # --- Видеофайл ---
     cap_video = cv2.VideoCapture(VIDEO_PATH)
@@ -94,8 +149,6 @@ def main():
     # --- Окно на втором мониторе ---
     win = "AD Display"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-
-    # Показываем пустой кадр чтобы окно появилось, затем перемещаем
     blank = np.zeros((1080, 1920, 3), dtype=np.uint8)
     cv2.imshow(win, blank)
     cv2.waitKey(1)
@@ -105,64 +158,62 @@ def main():
 
     print(f"\nЗапущено. Монитор X={MONITOR_X_OFFSET}. Нажмите 'q' для выхода.\n")
 
-    state              = STATE_LIVE
+    # --- Общее состояние между потоками ---
+    shared = {
+        "live_frame":    None,
+        "state":         STATE_LIVE,
+        "video_restart": False,
+    }
+
+    stop_event = threading.Event()
+    t = threading.Thread(
+        target=capture_thread_fn,
+        args=(cap_live, marker1_small, marker2_small, shared, stop_event),
+        daemon=True,
+    )
+    t.start()
+
+    # --- Главный цикл: только display + video decode ---
     current_video_frame = None
-    last_video_time    = 0.0
-    debounce_count     = 0       # счётчик последовательных обнаружений маркера
+    last_video_time     = 0.0
 
     while True:
-        ret_live, frame_live = cap_live.read()
-        if not ret_live:
-            print("Нет сигнала с карты захвата...")
-            time.sleep(0.05)
-            continue
+        state = shared["state"]
 
-        gray_live = cv2.cvtColor(frame_live, cv2.COLOR_BGR2GRAY)
-
-        # ── Состояние LIVE: показываем живое видео, ждём marker1 ──────────────
         if state == STATE_LIVE:
-            if marker_found(gray_live, marker1, THRESHOLD):
-                debounce_count += 1
-                if debounce_count >= DEBOUNCE_FRAMES:
-                    print("marker.png найден → воспроизведение 0213.mp4")
-                    state = STATE_VIDEO
-                    debounce_count = 0
-                    cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    last_video_time = 0.0
-                    current_video_frame = None
-            else:
-                debounce_count = 0
+            frame = shared["live_frame"]
+            if frame is not None:
+                cv2.imshow(win, frame)
+            wait_ms = 1
 
-            display_frame = frame_live
+        else:  # STATE_VIDEO
+            if shared["video_restart"]:
+                cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                last_video_time     = 0.0
+                current_video_frame = None
+                shared["video_restart"] = False
 
-        # ── Состояние VIDEO: показываем 0213.mp4, ждём marker2 ───────────────
-        else:
-            if marker_found(gray_live, marker2, THRESHOLD):
-                debounce_count += 1
-                if debounce_count >= DEBOUNCE_FRAMES:
-                    print("marker2.png найден → возврат к живому видео")
-                    state = STATE_LIVE
-                    debounce_count = 0
-            else:
-                debounce_count = 0
-
-            # Читаем следующий кадр видео в нужный момент времени
             now = time.time()
             if now - last_video_time >= frame_delay:
                 ret_vid, frame_vid = cap_video.read()
-                if not ret_vid:                   # конец видео — зацикливаем
+                if not ret_vid:                      # конец видео — зацикливаем
                     cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     ret_vid, frame_vid = cap_video.read()
                 if ret_vid:
                     current_video_frame = frame_vid
                 last_video_time = now
 
-            display_frame = current_video_frame if current_video_frame is not None else frame_live
+            if current_video_frame is not None:
+                cv2.imshow(win, current_video_frame)
 
-        cv2.imshow(win, display_frame)
-        if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+            # Ждём ровно столько, сколько осталось до следующего кадра
+            remaining = last_video_time + frame_delay - time.time()
+            wait_ms = max(1, int(remaining * 1000))
+
+        if cv2.waitKey(wait_ms) & 0xFF in (ord("q"), 27):
             break
 
+    stop_event.set()
     cap_live.release()
     cap_video.release()
     cv2.destroyAllWindows()
