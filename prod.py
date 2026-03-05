@@ -17,6 +17,7 @@ import time
 import sys
 import os
 import threading
+import subprocess
 
 BASE = os.path.join(os.path.dirname(__file__), "public")
 MARKER1_PATH = os.path.join(BASE, "marker.png")
@@ -147,6 +148,12 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
 
 
 def main():
+    # Скрываем курсор мыши
+    try:
+        subprocess.Popen(['unclutter', '-idle', '0', '-root'])
+    except FileNotFoundError:
+        print("Предупреждение: unclutter не установлен. Установите: sudo apt install unclutter")
+
     # --- Загрузка маркеров ---
     marker1 = cv2.imread(MARKER1_PATH, cv2.IMREAD_GRAYSCALE)
     marker2 = cv2.imread(MARKER2_PATH, cv2.IMREAD_GRAYSCALE)
