@@ -62,6 +62,42 @@ def marker_found(small_gray, marker_small, threshold):
     return max_val >= threshold
 
 
+def video_thread_fn(cap_video, shared, stop_event):
+    """
+    Поток декодирования видео: читает кадры из файла и кладёт их в shared["video_frame"].
+    Работает независимо от главного потока — если read() зависнет, display не остановится.
+    """
+    video_fps   = cap_video.get(cv2.CAP_PROP_FPS) or 30
+    frame_delay = 1.0 / video_fps
+    last_time   = 0.0
+
+    while not stop_event.is_set():
+        state = shared["state"]
+
+        if state != STATE_VIDEO:
+            time.sleep(0.02)
+            last_time = 0.0
+            continue
+
+        if shared.get("video_restart"):
+            cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            last_time = 0.0
+            shared["video_restart"] = False
+
+        now = time.time()
+        if now - last_time < frame_delay:
+            time.sleep(0.005)
+            continue
+
+        ret, frame = cap_video.read()
+        if not ret:  # конец видео — зацикливаем
+            cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = cap_video.read()
+        if ret:
+            shared["video_frame"] = frame
+        last_time = now
+
+
 def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event):
     """
     Поток захвата: читает кадры с карты захвата, обнаруживает маркеры.
@@ -142,8 +178,7 @@ def main():
     if not cap_video.isOpened():
         print(f"Ошибка: не удалось открыть {VIDEO_PATH}")
         sys.exit(1)
-    video_fps   = cap_video.get(cv2.CAP_PROP_FPS) or 30
-    frame_delay = 1.0 / video_fps
+    video_fps = cap_video.get(cv2.CAP_PROP_FPS) or 30
     print(f"Видео: {VIDEO_PATH}, FPS={video_fps:.1f}")
 
     # --- Окно на втором мониторе ---
@@ -161,22 +196,27 @@ def main():
     # --- Общее состояние между потоками ---
     shared = {
         "live_frame":    None,
+        "video_frame":   None,
         "state":         STATE_LIVE,
         "video_restart": False,
     }
 
     stop_event = threading.Event()
-    t = threading.Thread(
+
+    t_capture = threading.Thread(
         target=capture_thread_fn,
         args=(cap_live, marker1_small, marker2_small, shared, stop_event),
         daemon=True,
     )
-    t.start()
+    t_video = threading.Thread(
+        target=video_thread_fn,
+        args=(cap_video, shared, stop_event),
+        daemon=True,
+    )
+    t_capture.start()
+    t_video.start()
 
-    # --- Главный цикл: только display + video decode ---
-    current_video_frame = None
-    last_video_time     = 0.0
-
+    # --- Главный цикл: только display ---
     while True:
         state = shared["state"]
 
@@ -184,33 +224,12 @@ def main():
             frame = shared["live_frame"]
             if frame is not None:
                 cv2.imshow(win, frame)
-            wait_ms = 1
-
         else:  # STATE_VIDEO
-            if shared["video_restart"]:
-                cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                last_video_time     = 0.0
-                current_video_frame = None
-                shared["video_restart"] = False
+            frame = shared["video_frame"]
+            if frame is not None:
+                cv2.imshow(win, frame)
 
-            now = time.time()
-            if now - last_video_time >= frame_delay:
-                ret_vid, frame_vid = cap_video.read()
-                if not ret_vid:                      # конец видео — зацикливаем
-                    cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret_vid, frame_vid = cap_video.read()
-                if ret_vid:
-                    current_video_frame = frame_vid
-                last_video_time = now
-
-            if current_video_frame is not None:
-                cv2.imshow(win, current_video_frame)
-
-            # Ждём ровно столько, сколько осталось до следующего кадра
-            remaining = last_video_time + frame_delay - time.time()
-            wait_ms = max(1, int(remaining * 1000))
-
-        if cv2.waitKey(wait_ms) & 0xFF in (ord("q"), 27):
+        if cv2.waitKey(16) & 0xFF in (ord("q"), 27):  # ~60 Hz отображение
             break
 
     stop_event.set()
