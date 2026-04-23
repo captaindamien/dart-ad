@@ -19,10 +19,12 @@ import os
 import threading
 import subprocess
 
+from core import StateManager, STATE_LIVE, STATE_VIDEO
+
 BASE = os.path.join(os.path.dirname(__file__), "public")
 MARKER1_PATH = os.path.join(BASE, "marker.png")
 MARKER2_PATH = os.path.join(BASE, "marker2.png")
-VIDEO_PATH   = os.path.join(BASE, "0213.mp4")
+ADS_DIR      = os.path.join(BASE, "ads")
 
 THRESHOLD       = 0.75  # Порог совпадения маркера (0–1)
 DEBOUNCE_FRAMES = 3     # Сколько кадров подряд должен быть виден маркер
@@ -31,8 +33,11 @@ DETECT_EVERY_N  = 3     # Проверять маркер раз в N кадро
 
 MONITOR_X_OFFSET = int(sys.argv[1]) if len(sys.argv) > 1 else 1440
 
-STATE_LIVE  = "live"
-STATE_VIDEO = "video"
+
+# Колбэк бэкенда — подключите сюда HTTP-запрос к вашему API
+def on_state_change(old, new, duration):
+    print(f"[BACKEND] {old} → {new}, duration={duration:.2f}s")
+    # TODO: requests.post("https://your-backend/api/events", json={...})
 
 
 def find_capture_device(skip_first: bool = False):
@@ -63,25 +68,37 @@ def marker_found(small_gray, marker_small, threshold):
     return max_val >= threshold
 
 
-def video_thread_fn(cap_video, shared, stop_event):
+def load_playlist(ads_dir):
+    exts = ('.mp4', '.avi', '.mkv', '.mov')
+    files = sorted(f for f in os.listdir(ads_dir) if f.lower().endswith(exts))
+    return [os.path.join(ads_dir, f) for f in files]
+
+
+def video_thread_fn(ads_dir, shared, stop_event, sm):
     """
-    Поток декодирования видео: читает кадры из файла и кладёт их в shared["video_frame"].
-    Работает независимо от главного потока — если read() зависнет, display не остановится.
+    Поток декодирования видео: читает кадры из файлов папки ads по очереди,
+    после последнего возвращается к первому.
     """
-    video_fps   = cap_video.get(cv2.CAP_PROP_FPS) or 30
+    playlist = load_playlist(ads_dir)
+    if not playlist:
+        print(f"Предупреждение: нет видеофайлов в {ads_dir}")
+        return
+
+    print(f"Плейлист ({len(playlist)} файлов): {[os.path.basename(p) for p in playlist]}")
+
+    idx = 0
+    cap = cv2.VideoCapture(playlist[idx])
+    video_fps   = cap.get(cv2.CAP_PROP_FPS) or 30
     frame_delay = 1.0 / video_fps
     last_time   = 0.0
 
     while not stop_event.is_set():
-        state = shared["state"]
-
-        if state != STATE_VIDEO:
+        if sm.state != STATE_VIDEO:
             time.sleep(0.02)
             last_time = 0.0
             continue
 
         if shared.get("video_restart"):
-            cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
             last_time = 0.0
             shared["video_restart"] = False
 
@@ -90,16 +107,24 @@ def video_thread_fn(cap_video, shared, stop_event):
             time.sleep(0.005)
             continue
 
-        ret, frame = cap_video.read()
-        if not ret:  # конец видео — зацикливаем
-            cap_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, frame = cap_video.read()
-        if ret:
-            shared["video_frame"] = frame
+        ret, frame = cap.read()
+        if not ret:  # конец текущего видео — переходим к следующему
+            cap.release()
+            idx = (idx + 1) % len(playlist)
+            print(f"[VIDEO] Следующее: {os.path.basename(playlist[idx])}")
+            cap = cv2.VideoCapture(playlist[idx])
+            video_fps   = cap.get(cv2.CAP_PROP_FPS) or 30
+            frame_delay = 1.0 / video_fps
+            last_time   = 0.0
+            continue
+
+        shared["video_frame"] = frame
         last_time = now
 
+    cap.release()
 
-def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event):
+
+def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event, sm):
     """
     Поток захвата: читает кадры с карты захвата, обнаруживает маркеры.
     Не блокирует главный поток — display и video работают независимо.
@@ -113,25 +138,20 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
             time.sleep(0.01)
             continue
 
-        # Сохраняем последний живой кадр для отображения
         shared["live_frame"] = frame
         frame_count += 1
 
-        # Template matching только раз в DETECT_EVERY_N кадров
         if frame_count % DETECT_EVERY_N != 0:
             continue
 
         small = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
         gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
-        state = shared["state"]
-
-        if state == STATE_LIVE:
+        if sm.state == STATE_LIVE:
             if marker_found(gray_small, marker1_small, THRESHOLD):
                 debounce_count += 1
                 if debounce_count >= DEBOUNCE_FRAMES:
-                    print("marker.png найден → воспроизведение 0213.mp4")
-                    shared["state"] = STATE_VIDEO
+                    sm.transition(STATE_VIDEO)
                     shared["video_restart"] = True
                     debounce_count = 0
             else:
@@ -140,8 +160,7 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
             if marker_found(gray_small, marker2_small, THRESHOLD):
                 debounce_count += 1
                 if debounce_count >= DEBOUNCE_FRAMES:
-                    print("marker2.png найден → возврат к живому видео")
-                    shared["state"] = STATE_LIVE
+                    sm.transition(STATE_LIVE)
                     debounce_count = 0
             else:
                 debounce_count = 0
@@ -180,13 +199,14 @@ def main():
     cap_live.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     cap_live.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # минимальный буфер → всегда свежий кадр
 
-    # --- Видеофайл ---
-    cap_video = cv2.VideoCapture(VIDEO_PATH)
-    if not cap_video.isOpened():
-        print(f"Ошибка: не удалось открыть {VIDEO_PATH}")
+    # --- Проверка папки с рекламой ---
+    if not os.path.isdir(ADS_DIR):
+        print(f"Ошибка: папка {ADS_DIR} не найдена")
         sys.exit(1)
-    video_fps = cap_video.get(cv2.CAP_PROP_FPS) or 30
-    print(f"Видео: {VIDEO_PATH}, FPS={video_fps:.1f}")
+    playlist = load_playlist(ADS_DIR)
+    if not playlist:
+        print(f"Ошибка: нет видеофайлов в {ADS_DIR}")
+        sys.exit(1)
 
     # --- Окно на втором мониторе ---
     win = "AD Display"
@@ -201,10 +221,11 @@ def main():
     print(f"\nЗапущено. Монитор X={MONITOR_X_OFFSET}. Нажмите 'q' для выхода.\n")
 
     # --- Общее состояние между потоками ---
+    sm = StateManager(on_change_callback=on_state_change)
+
     shared = {
         "live_frame":    None,
         "video_frame":   None,
-        "state":         STATE_LIVE,
         "video_restart": False,
     }
 
@@ -212,12 +233,12 @@ def main():
 
     t_capture = threading.Thread(
         target=capture_thread_fn,
-        args=(cap_live, marker1_small, marker2_small, shared, stop_event),
+        args=(cap_live, marker1_small, marker2_small, shared, stop_event, sm),
         daemon=True,
     )
     t_video = threading.Thread(
         target=video_thread_fn,
-        args=(cap_video, shared, stop_event),
+        args=(ADS_DIR, shared, stop_event, sm),
         daemon=True,
     )
     t_capture.start()
@@ -225,9 +246,7 @@ def main():
 
     # --- Главный цикл: только display ---
     while True:
-        state = shared["state"]
-
-        if state == STATE_LIVE:
+        if sm.state == STATE_LIVE:
             frame = shared["live_frame"]
             if frame is not None:
                 cv2.imshow(win, frame)
@@ -241,7 +260,6 @@ def main():
 
     stop_event.set()
     cap_live.release()
-    cap_video.release()
     cv2.destroyAllWindows()
     print("Завершено.")
 
