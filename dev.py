@@ -20,23 +20,13 @@ import time
 import os
 
 from core import StateManager, STATE_LIVE, STATE_VIDEO
+from prod import load_playlist, video_thread_fn, on_state_change
 
 BASE    = os.path.join(os.path.dirname(__file__), "public")
 ADS_DIR = os.path.join(BASE, "ads")
 
 # Отдельный видеофайл для «живого» потока. Если не задан — генерируем синий фон.
 LIVE_VIDEO_PATH = None  # например: os.path.join(BASE, "live_source.mp4")
-
-
-# ── Колбэк для бэкенда ─────────────────────────────────────────────────────────
-def on_state_change(old, new, duration):
-    """Точка интеграции с бэкендом. Сейчас просто логирует."""
-    print(f"[BACKEND] {old} → {new}, duration={duration:.2f}s")
-    # TODO: заменить на HTTP-запрос:
-    # requests.post("https://your-backend/api/events", json={
-    #     "from": old, "to": new, "duration": duration,
-    #     "timestamp": time.time()
-    # })
 
 
 # ── Синтетический «живой» поток ────────────────────────────────────────────────
@@ -57,62 +47,6 @@ def generate_live_frame(t):
     cv2.putText(frame, f"LIVE SOURCE  {secs:02d}s", (30, 240),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 200, 255), 2, cv2.LINE_AA)
     return frame
-
-
-# ── Плейлист ──────────────────────────────────────────────────────────────────
-def load_playlist(ads_dir):
-    exts = ('.mp4', '.avi', '.mkv', '.mov')
-    files = sorted(f for f in os.listdir(ads_dir) if f.lower().endswith(exts))
-    return [os.path.join(ads_dir, f) for f in files]
-
-
-# ── Поток видео (реклама) ──────────────────────────────────────────────────────
-def video_thread_fn(ads_dir, shared, stop_event):
-    playlist = load_playlist(ads_dir)
-    if not playlist:
-        print(f"Предупреждение: нет видеофайлов в {ads_dir}")
-        return
-
-    print(f"Плейлист ({len(playlist)} файлов): {[os.path.basename(p) for p in playlist]}")
-
-    idx = 0
-    cap = cv2.VideoCapture(playlist[idx])
-    video_fps   = cap.get(cv2.CAP_PROP_FPS) or 30
-    frame_delay = 1.0 / video_fps
-    last_time   = 0.0
-    shared["current_video"] = os.path.basename(playlist[idx])
-
-    while not stop_event.is_set():
-        if shared["state"] != STATE_VIDEO:
-            time.sleep(0.02)
-            last_time = 0.0
-            continue
-
-        if shared.get("video_restart"):
-            last_time = 0.0
-            shared["video_restart"] = False
-
-        now = time.time()
-        if now - last_time < frame_delay:
-            time.sleep(0.005)
-            continue
-
-        ret, frame = cap.read()
-        if not ret:  # конец текущего видео — переходим к следующему
-            cap.release()
-            idx = (idx + 1) % len(playlist)
-            print(f"[VIDEO] Следующее: {os.path.basename(playlist[idx])}")
-            cap = cv2.VideoCapture(playlist[idx])
-            video_fps   = cap.get(cv2.CAP_PROP_FPS) or 30
-            frame_delay = 1.0 / video_fps
-            last_time   = 0.0
-            shared["current_video"] = os.path.basename(playlist[idx])
-            continue
-
-        shared["video_frame"] = frame
-        last_time = now
-
-    cap.release()
 
 
 # ── Поток «живого» источника ───────────────────────────────────────────────────
@@ -175,7 +109,6 @@ def main():
     sm = StateManager(on_change_callback=on_state_change)
 
     shared = {
-        "state":         sm.state,
         "live_frame":    None,
         "video_frame":   None,
         "video_restart": False,
@@ -185,7 +118,7 @@ def main():
     stop_event = threading.Event()
 
     t_live  = threading.Thread(target=live_thread_fn,  args=(cap_live, shared, stop_event), daemon=True)
-    t_video = threading.Thread(target=video_thread_fn, args=(ADS_DIR, shared, stop_event), daemon=True)
+    t_video = threading.Thread(target=video_thread_fn, args=(ADS_DIR, shared, stop_event, sm), daemon=True)
     t_live.start()
     t_video.start()
 
@@ -200,8 +133,6 @@ def main():
     print("  q / Esc → выход\n")
 
     while True:
-        shared["state"] = sm.state
-
         if sm.state == STATE_LIVE:
             frame = shared.get("live_frame")
         else:

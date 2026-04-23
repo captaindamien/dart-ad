@@ -91,6 +91,7 @@ def video_thread_fn(ads_dir, shared, stop_event, sm):
     video_fps   = cap.get(cv2.CAP_PROP_FPS) or 30
     frame_delay = 1.0 / video_fps
     last_time   = 0.0
+    shared["current_video"] = os.path.basename(playlist[idx])
 
     while not stop_event.is_set():
         if sm.state != STATE_VIDEO:
@@ -116,6 +117,7 @@ def video_thread_fn(ads_dir, shared, stop_event, sm):
             video_fps   = cap.get(cv2.CAP_PROP_FPS) or 30
             frame_delay = 1.0 / video_fps
             last_time   = 0.0
+            shared["current_video"] = os.path.basename(playlist[idx])
             continue
 
         shared["video_frame"] = frame
@@ -227,6 +229,7 @@ def main():
         "live_frame":    None,
         "video_frame":   None,
         "video_restart": False,
+        "current_video": "",
     }
 
     stop_event = threading.Event()
