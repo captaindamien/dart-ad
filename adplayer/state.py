@@ -7,8 +7,7 @@ STATE_VIDEO = "video"
 class StateManager:
     """
     Управляет переходами между состояниями LIVE и VIDEO.
-    on_change_callback(old_state, new_state, duration_seconds) вызывается при каждой смене —
-    сюда подключается бэкенд (HTTP, WebSocket, etc.).
+    on_change_callback(old_state, new_state, duration_seconds) вызывается при каждой смене.
     """
 
     def __init__(self, on_change_callback=None):

@@ -1,80 +1,97 @@
+"""
+ILSport Dart Ad Player — точка входа для продакшена.
+
+Логика:
+  LIVE  → обнаружен marker.png  → воспроизводит рекламные видео из плейлиста
+  VIDEO → обнаружен marker2.png → возвращается к живому видео
+
+Переменные окружения (из /etc/ilsport/env):
+  SERVER_URL          — URL бэкенда (напр. https://your-server.com)
+  MACHINE_TOKEN       — токен машины (X-Machine-Token)
+  ADS_DIR             — папка для видео (по умолчанию ./public/ads)
+  SYNC_INTERVAL       — интервал синхронизации плейлиста в секундах (по умолчанию 300)
+  HEARTBEAT_INTERVAL  — интервал хартбита в секундах (по умолчанию 30)
+
+Запуск:
+  python main.py [X_offset]
+  X_offset — горизонтальное смещение второго монитора (по умолчанию 1440)
+"""
+
+import sys
+import threading
+import subprocess
+
 import cv2
 import numpy as np
 
-# Настройки
-CAPTURE_CARD_INDEX = 0  # Индекс карты захвата (попробуйте 0, 1 или 2)
-MARKER_PATH = '/Users/captaindamien/Desktop/github/dart-ad/public/marker.png'  # Путь к изображению-маркеру
-MARKER_PATH1 = '/Users/captaindamien/Desktop/github/dart-ad/public/marker2.png'  # Путь к изображению-маркеру 2
-RECORDED_VIDEO_PATH = '/Users/captaindamien/Desktop/github/dart-ad/public/0213.mp4'  # Видео на ПК №2
-THRESHOLD = 0.8  # Порог точности совпадения (0.0 - 1.0)
+from adplayer.config import MARKER1_PATH, MARKER2_PATH, ADS_DIR, SERVER_URL
+from adplayer.state import StateManager, STATE_LIVE, STATE_VIDEO
+from adplayer.api import sync_loop, heartbeat_loop, heartbeat_event
+from adplayer.capture import find_capture_device, load_markers, capture_thread_fn
+from adplayer.player import video_thread_fn
+
+MONITOR_X_OFFSET = int(sys.argv[1]) if len(sys.argv) > 1 else 1440
+
+
+def on_state_change(old, new, duration):
+    print(f"[STATE] {old} → {new}, duration={duration:.2f}s")
+    heartbeat_event.set()
 
 
 def main():
-    # 1. Захват потока с карты захвата (ПК №1)
-    cap_live = cv2.VideoCapture(CAPTURE_CARD_INDEX)
+    try:
+        subprocess.Popen(['unclutter', '-idle', '0', '-root'])
+    except FileNotFoundError:
+        pass
 
-    # 2. Загрузка записанного видео (ПК №2)
-    cap_recorded = cv2.VideoCapture(RECORDED_VIDEO_PATH)
+    try:
+        marker1_small, marker2_small = load_markers(MARKER1_PATH, MARKER2_PATH)
+    except FileNotFoundError as e:
+        print(f"Ошибка: {e}"); sys.exit(1)
 
-    # 3. Загрузка маркера
-    marker = cv2.imread(MARKER_PATH, 0)
-    if marker is None:
-        print("Ошибка: Файл маркера не найден!")
-        return
-    w, h = marker.shape[::-1]
-    marker1 = cv2.imread(MARKER_PATH1, 0)
-    if marker is None:
-        print("Ошибка: Файл маркера не найден!")
-        return
-    w, h = marker.shape[::-1]
+    print("Поиск устройства захвата…")
+    cap_live, _ = find_capture_device(skip_first=False)
+    if cap_live is None:
+        print("Ошибка: карта захвата не найдена."); sys.exit(1)
+    cap_live.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap_live.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    cap_live.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    # Настройка полноэкранного режима на внешнем мониторе
-    window_name = 'Output Monitor'
-    cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    win = "AD Display"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.imshow(win, np.zeros((1080, 1920, 3), dtype=np.uint8))
+    cv2.waitKey(1)
+    cv2.moveWindow(win, MONITOR_X_OFFSET, 0)
+    cv2.waitKey(200)
+    cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-    print("Система запущена. Нажмите 'q' для выхода.")
+    sm         = StateManager(on_change_callback=on_state_change)
+    shared     = {"live_frame": None, "video_frame": None, "video_restart": False, "current_video": None}
+    stop_event = threading.Event()
+
+    threads = [
+        threading.Thread(target=sync_loop,         args=(stop_event,),                                                   daemon=True, name="sync"),
+        threading.Thread(target=heartbeat_loop,    args=(shared, stop_event, sm),                                         daemon=True, name="heartbeat"),
+        threading.Thread(target=capture_thread_fn, args=(cap_live, marker1_small, marker2_small, shared, stop_event, sm), daemon=True, name="capture"),
+        threading.Thread(target=video_thread_fn,   args=(shared, stop_event, sm),                                         daemon=True, name="video"),
+    ]
+    for t in threads:
+        t.start()
+
+    print(f"\nЗапущено. SERVER_URL={SERVER_URL}, ADS_DIR={ADS_DIR}, монитор X={MONITOR_X_OFFSET}. Нажмите 'q' для выхода.\n")
 
     while True:
-        # Читаем кадр с ПК №1
-        ret_live, frame_live = cap_live.read()
-        if not ret_live:
+        frame = shared["live_frame"] if sm.state == STATE_LIVE else shared["video_frame"]
+        if frame is not None:
+            cv2.imshow(win, frame)
+        if cv2.waitKey(16) & 0xFF in (ord("q"), 27):
             break
 
-        # Конвертируем в ч/б для поиска маркера
-        gray_frame = cv2.cvtColor(frame_live, cv2.COLOR_BGR2GRAY)
-
-        # Поиск маркера методом сопоставления шаблонов
-        res = cv2.matchTemplate(gray_frame, marker, cv2.TM_CCOEFF_NORMED)
-        loc = np.where(res >= THRESHOLD)
-
-        # Проверка: найден ли маркер?
-        marker_found = len(loc[0]) > 0
-
-        if marker_found:
-            # Если маркер есть — выводим живое видео с ПК №1
-            display_frame = frame_live
-        else:
-            # Если маркера нет — выводим записанное видео с ПК №2
-            ret_rec, frame_rec = cap_recorded.read()
-
-            # Если видео закончилось, запускаем его заново (зацикливание)
-            if not ret_rec:
-                cap_recorded.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret_rec, frame_rec = cap_recorded.read()
-
-            display_frame = frame_rec
-
-        # Вывод изображения на внешний монитор
-        cv2.imshow(window_name, display_frame)
-
-        # Выход по клавише 'q'
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
+    stop_event.set()
+    heartbeat_event.set()
     cap_live.release()
-    cap_recorded.release()
     cv2.destroyAllWindows()
+    print("Завершено.")
 
 
 if __name__ == "__main__":

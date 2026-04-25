@@ -1,7 +1,7 @@
 """
-dev.py — локальная эмуляция prod.py без capture card и второго монитора.
+dev.py — локальная эмуляция без capture card и второго монитора.
 
-Полностью использует prod.py: синхронизация плейлиста с бэкендом,
+Полностью использует пакет adplayer: синхронизация плейлиста с бэкендом,
 загрузка видео, хартбит. Маркеры заменены клавишами.
 
 Клавиши:
@@ -17,22 +17,22 @@ import threading
 import time
 import os
 
-import prod as _prod
-from core import StateManager, STATE_LIVE, STATE_VIDEO
-from prod import (
-    video_thread_fn, on_state_change,
-    playlist_lock,
-    sync_loop, heartbeat_loop, heartbeat_event,
-    ADS_DIR, MACHINE_TOKEN, SERVER_URL,
-)
+from adplayer.state import StateManager, STATE_LIVE, STATE_VIDEO
+from adplayer.api import sync_loop, heartbeat_loop, heartbeat_event, get_playlist
+from adplayer.player import video_thread_fn
+from adplayer.config import ADS_DIR, MACHINE_TOKEN, SERVER_URL
 
 # Опционально: путь к видеофайлу для имитации «живого» источника.
-# None — генерируем синий фон с таймером.
+# None — генерируется синий фон с таймером.
 LIVE_VIDEO_PATH = None
 
 
-# ── Синтетический «живой» поток ────────────────────────────────────────────────
-def make_live_source():
+def on_state_change(old, new, duration):
+    print(f"[STATE] {old} → {new}, duration={duration:.2f}s")
+    heartbeat_event.set()
+
+
+def _make_live_source():
     if LIVE_VIDEO_PATH and os.path.exists(LIVE_VIDEO_PATH):
         cap = cv2.VideoCapture(LIVE_VIDEO_PATH)
         if cap.isOpened():
@@ -40,7 +40,7 @@ def make_live_source():
     return None
 
 
-def generate_live_frame(t):
+def _generate_live_frame(t):
     frame = np.zeros((480, 854, 3), dtype=np.uint8)
     frame[:] = (80, 40, 20)
     secs = int(t) % 60
@@ -50,7 +50,7 @@ def generate_live_frame(t):
 
 
 def live_thread_fn(cap_live, shared, stop_event):
-    t0 = time.time()
+    t0        = time.time()
     fps_delay = 1.0 / 30
     last_time = 0.0
 
@@ -69,11 +69,10 @@ def live_thread_fn(cap_live, shared, stop_event):
             if ret:
                 shared["live_frame"] = frame
         else:
-            shared["live_frame"] = generate_live_frame(time.time() - t0)
+            shared["live_frame"] = _generate_live_frame(time.time() - t0)
 
 
-# ── HUD overlay ────────────────────────────────────────────────────────────────
-def draw_hud(frame, sm, shared):
+def _draw_hud(frame, sm, shared):
     h, w = frame.shape[:2]
     overlay = frame.copy()
 
@@ -86,9 +85,7 @@ def draw_hud(frame, sm, shared):
 
     video_name = shared.get("current_video") or ""
     video_info = f"   [{video_name}]" if sm.state == STATE_VIDEO and video_name else ""
-
-    with playlist_lock:
-        pl_count = len(_prod.server_playlist)
+    pl_count   = len(get_playlist())
 
     cv2.putText(frame,
                 f"[DEV]  {state_label}   {elapsed:.1f}s   trans:{sm.transitions}   pl:{pl_count}{video_info}",
@@ -98,7 +95,6 @@ def draw_hud(frame, sm, shared):
     return frame
 
 
-# ── main ───────────────────────────────────────────────────────────────────────
 def main():
     print("=== dart-ad DEV MODE ===")
     print(f"  SERVER_URL   = {SERVER_URL}")
@@ -106,24 +102,16 @@ def main():
     print(f"  MACHINE_TOKEN= {'✓ set' if MACHINE_TOKEN else '✗ NOT SET — sync/heartbeat disabled'}")
     print()
 
-    cap_live = make_live_source()
-
-    sm = StateManager(on_change_callback=on_state_change)
-
-    shared = {
-        "live_frame":    None,
-        "video_frame":   None,
-        "video_restart": False,
-        "current_video": None,
-    }
-
+    cap_live   = _make_live_source()
+    sm         = StateManager(on_change_callback=on_state_change)
+    shared     = {"live_frame": None, "video_frame": None, "video_restart": False, "current_video": None}
     stop_event = threading.Event()
 
     threads = [
-        threading.Thread(target=sync_loop,      args=(stop_event,),                  daemon=True, name="sync"),
-        threading.Thread(target=heartbeat_loop, args=(shared, stop_event, sm),        daemon=True, name="heartbeat"),
-        threading.Thread(target=live_thread_fn, args=(cap_live, shared, stop_event),  daemon=True, name="live"),
-        threading.Thread(target=video_thread_fn, args=(shared, stop_event, sm),       daemon=True, name="video"),
+        threading.Thread(target=sync_loop,       args=(stop_event,),                  daemon=True, name="sync"),
+        threading.Thread(target=heartbeat_loop,  args=(shared, stop_event, sm),        daemon=True, name="heartbeat"),
+        threading.Thread(target=live_thread_fn,  args=(cap_live, shared, stop_event),  daemon=True, name="live"),
+        threading.Thread(target=video_thread_fn, args=(shared, stop_event, sm),        daemon=True, name="video"),
     ]
     for t in threads:
         t.start()
@@ -132,19 +120,14 @@ def main():
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, 854, 480)
 
-    print("Управление:")
-    print("  1  → marker1 (LIVE → VIDEO / запустить рекламу)")
-    print("  2  → marker2 (VIDEO → LIVE)")
-    print("  r  → сбросить в STATE_LIVE")
-    print("  q / Esc → выход")
-    print()
+    print("Управление: 1=AD  2=LIVE  r=reset  q/Esc=quit")
     print("Ждём первой синхронизации плейлиста…")
 
     while True:
         frame = shared.get("live_frame") if sm.state == STATE_LIVE else shared.get("video_frame")
 
         if frame is not None:
-            display = draw_hud(frame.copy(), sm, shared)
+            display = _draw_hud(frame.copy(), sm, shared)
             cv2.imshow(win, display)
 
         key = cv2.waitKey(16) & 0xFF
@@ -169,7 +152,7 @@ def main():
             break
 
     stop_event.set()
-    heartbeat_event.set()  # разблокировать поток хартбита
+    heartbeat_event.set()
     if cap_live is not None:
         cap_live.release()
     cv2.destroyAllWindows()
