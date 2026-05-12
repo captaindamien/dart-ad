@@ -1,0 +1,23 @@
+[Unit]
+Description=ILSport reverse SSH tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+EnvironmentFile=/etc/ilsport/env
+ExecStart=/usr/bin/autossh -M 0 -N \
+  -o "ServerAliveInterval 30" \
+  -o "ServerAliveCountMax 3" \
+  -o "ExitOnForwardFailure yes" \
+  -o "StrictHostKeyChecking accept-new" \
+  -o "UserKnownHostsFile=@HOME@/.ssh/known_hosts" \
+  -i @HOME@/.ssh/ilsport_tunnel \
+  -R ${TUNNEL_PORT}:localhost:22 \
+  ${TUNNEL_USER}@${SERVER_HOST}
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+[Unit]
+Description=ILSport Dart Ad Player (headless fallback)
+Documentation=https://github.com/captaindamien/dart-ad
+After=network-online.target
+Wants=network-online.target
+
+# Этот юнит используется как fallback: основной запуск идёт из X-сессии
+# через ~/.config/autostart/dart-ad-kiosk.desktop, потому что cv2.imshow
+# требует DISPLAY. Включай этот юнит вручную, если нужен headless-режим
+# (например, отладка без второго монитора).
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@INSTALL_DIR@
+EnvironmentFile=/etc/ilsport/env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 @INSTALL_DIR@/main.py ${MONITOR_X_OFFSET}
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/ilsport-dart-ad.log
+StandardError=append:/var/log/ilsport-dart-ad.log
+PIDFile=/run/ilsport-dart-ad.pid
+
+[Install]
+WantedBy=multi-user.target

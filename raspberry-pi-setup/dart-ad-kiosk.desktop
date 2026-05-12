@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ILSport Dart Ad Player
+Comment=Запуск рекламного плеера на втором мониторе
+Exec=/bin/bash -lc "$HOME/.ilsport-kiosk-autostart.sh"
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-LXQt-Need-Tray=false
+NoDisplay=true

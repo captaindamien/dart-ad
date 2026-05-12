@@ -1,0 +1,9 @@
+[Unit]
+Description=ILSport dart-ad auto-update (git pull + restart)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+EnvironmentFile=/etc/ilsport/env
+ExecStart=@INSTALL_DIR@/raspberry-pi-setup/update.sh

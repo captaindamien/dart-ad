@@ -1,0 +1,12 @@
+[Unit]
+Description=ILSport dart-ad auto-update timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Unit=ilsport-update.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
