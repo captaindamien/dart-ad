@@ -69,6 +69,12 @@ def main():
     cv2.moveWindow(win, MONITOR_X_OFFSET, 0)
     cv2.waitKey(200)
     cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.waitKey(200)
+    try:
+        subprocess.run(['wmctrl', '-r', win, '-b', 'add,above,fullscreen'],
+                       check=False, timeout=2)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        print("[WARN] wmctrl не установлен — панель задач может остаться видимой")
 
     print("Запускаю mpv…")
     mpv = MpvPlayer(monitor_x=MONITOR_X_OFFSET)

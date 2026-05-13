@@ -77,7 +77,7 @@ sudo apt-get install -y \
   git curl ca-certificates \
   python3 python3-pip python3-opencv python3-numpy \
   mpv \
-  unclutter \
+  unclutter wmctrl \
   autossh openssh-client
 
 # --- gpu_mem для V4L2 M2M H.264 декодера на Pi 4 ------------------------------

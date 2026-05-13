@@ -45,7 +45,7 @@ class MpvPlayer:
             "--no-osd-bar",
             "--cursor-autohide=no",
             "--no-audio",
-            "--hwdec=v4l2m2m-copy",
+            "--hwdec=auto-safe",
             "--vo=gpu",
             "--gpu-context=x11egl",
             "--loop-playlist=inf",
