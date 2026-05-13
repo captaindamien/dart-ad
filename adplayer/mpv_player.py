@@ -19,11 +19,8 @@ import time
 
 
 class MpvPlayer:
-    def __init__(self, monitor_x=0, width=1920, height=1080,
-                 socket_path="/tmp/ilsport-mpv.sock"):
+    def __init__(self, monitor_x=0, socket_path="/tmp/ilsport-mpv.sock"):
         self.monitor_x   = monitor_x
-        self.width       = width
-        self.height      = height
         self.socket_path = socket_path
 
         self._proc      = None
@@ -53,9 +50,8 @@ class MpvPlayer:
             "--gpu-context=x11egl",
             "--loop-playlist=inf",
             "--keep-open=no",
-            "--ontop",
             "--no-border",
-            f"--geometry={self.width}x{self.height}+{self.monitor_x}+0",
+            f"--geometry=+{self.monitor_x}+0",
             "--pause=yes",
             "--window-minimized=yes",
             f"--input-ipc-server={self.socket_path}",
@@ -131,11 +127,13 @@ class MpvPlayer:
 
     def play(self):
         self._send(["set_property", "window-minimized", False])
+        self._send(["set_property", "fullscreen", True])
         self._send(["set_property", "pause", False])
         self._is_paused = False
 
     def pause_and_hide(self):
         self._send(["set_property", "pause", True])
+        self._send(["set_property", "fullscreen", False])
         self._send(["set_property", "window-minimized", True])
         self._is_paused = True
 
