@@ -48,8 +48,9 @@ DETECT_EVERY_N_VIDEO = DETECT_EVERY_N * 4
 
 
 def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event, sm):
-    frame_count    = 0
-    debounce_count = 0
+    frame_count       = 0
+    debounce_count    = 0
+    marker1_triggered = False
 
     while not stop_event.is_set():
         ret, frame = cap_live.read()
@@ -68,19 +69,31 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
         gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
         if sm.state == STATE_LIVE:
-            if _marker_found(gray_small, marker1_small, THRESHOLD):
-                debounce_count += 1
-                if debounce_count >= DEBOUNCE_FRAMES:
-                    sm.transition(STATE_VIDEO)
-                    shared["video_restart"] = True
+            if marker1_triggered:
+                # marker1 уже сработал — ждём marker2, игнорируем повторный marker1
+                if _marker_found(gray_small, marker2_small, THRESHOLD):
+                    debounce_count += 1
+                    if debounce_count >= DEBOUNCE_FRAMES:
+                        marker1_triggered = False
+                        debounce_count = 0
+                else:
                     debounce_count = 0
             else:
-                debounce_count = 0
+                if _marker_found(gray_small, marker1_small, THRESHOLD):
+                    debounce_count += 1
+                    if debounce_count >= DEBOUNCE_FRAMES:
+                        sm.transition(STATE_VIDEO)
+                        shared["video_restart"] = True
+                        marker1_triggered = True
+                        debounce_count = 0
+                else:
+                    debounce_count = 0
         else:
             if _marker_found(gray_small, marker2_small, THRESHOLD):
                 debounce_count += 1
                 if debounce_count >= DEBOUNCE_FRAMES:
                     sm.transition(STATE_LIVE)
+                    marker1_triggered = False
                     debounce_count = 0
             else:
                 debounce_count = 0
