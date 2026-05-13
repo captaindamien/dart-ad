@@ -44,6 +44,9 @@ def _marker_found(small_gray, marker_small, threshold):
     return max_val >= threshold
 
 
+DETECT_EVERY_N_VIDEO = DETECT_EVERY_N * 4
+
+
 def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event, sm):
     frame_count    = 0
     debounce_count = 0
@@ -57,7 +60,8 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
         shared["live_frame"] = frame
         frame_count += 1
 
-        if frame_count % DETECT_EVERY_N != 0:
+        detect_every = DETECT_EVERY_N if sm.state == STATE_LIVE else DETECT_EVERY_N_VIDEO
+        if frame_count % detect_every != 0:
             continue
 
         small      = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)

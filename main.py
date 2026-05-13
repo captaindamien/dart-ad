@@ -5,6 +5,10 @@ ILSport Dart Ad Player — точка входа для продакшена.
   LIVE  → обнаружен marker.png  → воспроизводит рекламные видео из плейлиста
   VIDEO → обнаружен marker2.png → возвращается к живому видео
 
+Рекламные видео декодируются и выводятся внешним процессом mpv с HW-ускорением
+(V4L2 M2M на Raspberry Pi 4). Live-картинка с карты захвата по-прежнему
+рендерится через cv2.imshow. mpv-окно с --ontop перекрывает cv2-окно в STATE_VIDEO.
+
 Переменные окружения (из /etc/ilsport/env):
   SERVER_URL          — URL бэкенда (напр. https://your-server.com)
   MACHINE_TOKEN       — токен машины (X-Machine-Token)
@@ -29,6 +33,7 @@ from adplayer.state import StateManager, STATE_LIVE, STATE_VIDEO
 from adplayer.api import sync_loop, heartbeat_loop, heartbeat_event
 from adplayer.capture import find_capture_device, load_markers, capture_thread_fn
 from adplayer.player import video_thread_fn
+from adplayer.mpv_player import MpvPlayer
 
 MONITOR_X_OFFSET = int(sys.argv[1]) if len(sys.argv) > 1 else 1440
 
@@ -65,8 +70,12 @@ def main():
     cv2.waitKey(200)
     cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
+    print("Запускаю mpv…")
+    mpv = MpvPlayer(monitor_x=MONITOR_X_OFFSET)
+    mpv.start()
+
     sm         = StateManager(on_change_callback=on_state_change)
-    shared     = {"live_frame": None, "video_frame": None, "video_restart": False, "current_video": None}
+    shared     = {"live_frame": None, "video_restart": False, "current_video": None, "mpv": mpv}
     stop_event = threading.Event()
 
     threads = [
@@ -80,18 +89,21 @@ def main():
 
     print(f"\nЗапущено. SERVER_URL={SERVER_URL}, ADS_DIR={ADS_DIR}, монитор X={MONITOR_X_OFFSET}. Нажмите 'q' для выхода.\n")
 
-    while True:
-        frame = shared["live_frame"] if sm.state == STATE_LIVE else shared["video_frame"]
-        if frame is not None:
-            cv2.imshow(win, frame)
-        if cv2.waitKey(16) & 0xFF in (ord("q"), 27):
-            break
-
-    stop_event.set()
-    heartbeat_event.set()
-    cap_live.release()
-    cv2.destroyAllWindows()
-    print("Завершено.")
+    try:
+        while True:
+            if sm.state == STATE_LIVE:
+                frame = shared["live_frame"]
+                if frame is not None:
+                    cv2.imshow(win, frame)
+            if cv2.waitKey(16) & 0xFF in (ord("q"), 27):
+                break
+    finally:
+        stop_event.set()
+        heartbeat_event.set()
+        mpv.stop()
+        cap_live.release()
+        cv2.destroyAllWindows()
+        print("Завершено.")
 
 
 if __name__ == "__main__":

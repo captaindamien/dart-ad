@@ -76,8 +76,35 @@ sudo apt-get update -q
 sudo apt-get install -y \
   git curl ca-certificates \
   python3 python3-pip python3-opencv python3-numpy \
+  mpv \
   unclutter \
   autossh openssh-client
+
+# --- gpu_mem для V4L2 M2M H.264 декодера на Pi 4 ------------------------------
+# mpv с --hwdec=v4l2m2m-copy требует минимум ~128 MB GPU-памяти.
+# На Pi 5 строка gpu_mem игнорируется, поэтому правка безопасна для обеих моделей.
+CONFIG_TXT=""
+for candidate in /boot/firmware/config.txt /boot/config.txt; do
+  if [[ -f "$candidate" ]]; then
+    CONFIG_TXT="$candidate"
+    break
+  fi
+done
+if [[ -n "$CONFIG_TXT" ]]; then
+  CURRENT_GPU_MEM="$(awk -F= '/^[[:space:]]*gpu_mem[[:space:]]*=/{print $2}' "$CONFIG_TXT" | tr -d ' ' | tail -1)"
+  if [[ -z "$CURRENT_GPU_MEM" || "$CURRENT_GPU_MEM" -lt 128 ]]; then
+    echo ">>> Поднимаю gpu_mem=128 в $CONFIG_TXT (было: ${CURRENT_GPU_MEM:-<не задано>})"
+    sudo sed -i '/^[[:space:]]*gpu_mem[[:space:]]*=/d' "$CONFIG_TXT"
+    echo 'gpu_mem=128' | sudo tee -a "$CONFIG_TXT" >/dev/null
+    GPU_MEM_CHANGED=1
+  else
+    echo ">>> gpu_mem уже >= 128 ($CURRENT_GPU_MEM), оставляю как есть."
+    GPU_MEM_CHANGED=0
+  fi
+else
+  echo ">>> config.txt не найден, gpu_mem не правлю."
+  GPU_MEM_CHANGED=0
+fi
 
 # --- git clone / pull ---------------------------------------------------------
 echo ""
@@ -184,6 +211,11 @@ echo "   Лог плеера: $SERVICE_HOME/.ilsport-player.log"
 echo ""
 echo "4. (опционально) Hardware watchdog:"
 echo "     bash $SETUP_DIR_SRC/setup-watchdog.sh"
+if [[ "${GPU_MEM_CHANGED:-0}" -eq 1 ]]; then
+  echo ""
+  echo "ВНИМАНИЕ: gpu_mem изменён — нужна перезагрузка, чтобы HW-декодер заработал:"
+  echo "     sudo reboot"
+fi
 echo ""
 echo "Полезные команды:"
 echo "   systemctl status ilsport-tunnel"
