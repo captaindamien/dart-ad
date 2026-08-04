@@ -4,18 +4,30 @@ import shutil
 import threading
 import urllib.request
 
-from .config import MACHINE_TOKEN, SERVER_URL, ADS_DIR, SYNC_INTERVAL, HEARTBEAT_INTERVAL
+from .config import (
+    MACHINE_TOKEN, SERVER_URL, ADS_DIR, SYNC_INTERVAL, HEARTBEAT_INTERVAL, AGENT_VERSION,
+)
 from .metrics import get_system_metrics
 from .state import STATE_VIDEO
 
 _playlist_lock   = threading.Lock()
 _server_playlist = []
+# Имя файла -> video_id. Сервер умеет сопоставлять показ и по имени файла,
+# но с явным id статистика не зависит от переименований и совпадений.
+_video_ids       = {}
 heartbeat_event  = threading.Event()
 
 
 def get_playlist():
     with _playlist_lock:
         return list(_server_playlist)
+
+
+def get_video_id(filename):
+    if not filename:
+        return None
+    with _playlist_lock:
+        return _video_ids.get(os.path.basename(filename))
 
 
 def _download_file(url, dest_path):
@@ -26,7 +38,7 @@ def _download_file(url, dest_path):
 
 
 def _sync_once():
-    global _server_playlist
+    global _server_playlist, _video_ids
     req = urllib.request.Request(
         f"{SERVER_URL}/api/display/playlist",
         headers={"X-Machine-Token": MACHINE_TOKEN},
@@ -68,8 +80,14 @@ def _sync_once():
         for item in items
         if os.path.exists(os.path.join(ADS_DIR, item["filename"]))
     ]
+    new_ids = {
+        item["filename"]: item.get("video_id")
+        for item in items
+        if item.get("video_id") is not None
+    }
     with _playlist_lock:
         _server_playlist = new_playlist
+        _video_ids = new_ids
     print(f"[SYNC] Playlist ({len(new_playlist)}): {[os.path.basename(p) for p in new_playlist]}")
 
 
@@ -87,7 +105,7 @@ def _do_send_heartbeat(state, current_video):
     if not MACHINE_TOKEN:
         return
     try:
-        payload = {"state": state, "current_video": current_video}
+        payload = {"state": state, "current_video": current_video, "agent_version": AGENT_VERSION}
         payload.update(get_system_metrics())
         body = json.dumps(payload).encode()
         req = urllib.request.Request(

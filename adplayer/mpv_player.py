@@ -146,6 +146,32 @@ class MpvPlayer:
             return resp.get("data")
         return None
 
+    def playback_time(self):
+        """
+        Позиция внутри текущего ролика в секундах.
+        Нужна, чтобы отличить повторный показ того же файла от продолжения:
+        при зацикленном плейлисте из одного ролика имя файла не меняется,
+        а время откатывается к нулю.
+        """
+        resp = self._send(["get_property", "playback-time"], expect_response=True)
+        if resp and resp.get("error") == "success":
+            value = resp.get("data")
+            return float(value) if isinstance(value, (int, float)) else None
+        return None
+
+    def duration(self):
+        """
+        Длина текущего ролика в секундах.
+        По ней учёт показов решает, досмотрен ролик или оборван: повод закрытия
+        показа сам по себе об этом не говорит.
+        Сразу после loadfile mpv может ещё не знать длину и вернуть None.
+        """
+        resp = self._send(["get_property", "duration"], expect_response=True)
+        if resp and resp.get("error") == "success":
+            value = resp.get("data")
+            return float(value) if isinstance(value, (int, float)) else None
+        return None
+
     @property
     def is_paused(self):
         return self._is_paused

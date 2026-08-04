@@ -9,12 +9,23 @@ ILSport Dart Ad Player — точка входа для продакшена.
 (V4L2 M2M на Raspberry Pi 4). Live-картинка с карты захвата по-прежнему
 рендерится через cv2.imshow. mpv-окно с --ontop перекрывает cv2-окно в STATE_VIDEO.
 
+Помимо картинки агент отдаёт на сервер телеметрию (heartbeat) и статистику
+показов рекламы. Показы копятся в файле на диске и досылаются пачками, поэтому
+обрыв связи или перезагрузка их не теряют.
+
 Переменные окружения (из /etc/ilsport/env):
-  SERVER_URL          — URL бэкенда (напр. https://your-server.com)
-  MACHINE_TOKEN       — токен машины (X-Machine-Token)
-  ADS_DIR             — папка для видео (по умолчанию ./public/ads)
-  SYNC_INTERVAL       — интервал синхронизации плейлиста в секундах (по умолчанию 300)
-  HEARTBEAT_INTERVAL  — интервал хартбита в секундах (по умолчанию 30)
+  SERVER_URL              — URL бэкенда (напр. https://your-server.com)
+  MACHINE_TOKEN           — токен машины (X-Machine-Token)
+  ADS_DIR                 — папка для видео (по умолчанию ./public/ads)
+  SYNC_INTERVAL           — интервал синхронизации плейлиста, с (по умолчанию 300)
+  HEARTBEAT_INTERVAL      — интервал хартбита, с (по умолчанию 15). Хартбит
+                            уходит и вне графика: при смене состояния и при
+                            смене текущего ролика
+  PLAYBACK_QUEUE_PATH     — файл очереди показов (~/.cache/ilsport/playback_queue.jsonl)
+  PLAYBACK_FLUSH_INTERVAL — как часто досылать накопленные показы, с (60)
+  PLAYBACK_BATCH_SIZE     — размер пачки (100, сервер принимает до 200)
+  PLAYBACK_QUEUE_MAX      — потолок очереди в событиях (20000)
+  PLAYBACK_MIN_SEC        — показ короче этого не засчитывается (1.0)
 
 Запуск:
   python main.py [X_offset]
@@ -22,6 +33,7 @@ ILSport Dart Ad Player — точка входа для продакшена.
 """
 
 import sys
+import time
 import threading
 import subprocess
 
@@ -33,6 +45,7 @@ from adplayer.state import StateManager, STATE_LIVE, STATE_VIDEO
 from adplayer.api import sync_loop, heartbeat_loop, heartbeat_event
 from adplayer.capture import find_capture_device, load_markers, capture_thread_fn
 from adplayer.player import video_thread_fn
+from adplayer.playback import sender_loop, flush_once
 from adplayer.mpv_player import MpvPlayer
 
 MONITOR_X_OFFSET = int(sys.argv[1]) if len(sys.argv) > 1 else 1440
@@ -89,6 +102,7 @@ def main():
         threading.Thread(target=heartbeat_loop,    args=(shared, stop_event, sm),                                         daemon=True, name="heartbeat"),
         threading.Thread(target=capture_thread_fn, args=(cap_live, marker1_small, marker2_small, shared, stop_event, sm), daemon=True, name="capture"),
         threading.Thread(target=video_thread_fn,   args=(shared, stop_event, sm),                                         daemon=True, name="video"),
+        threading.Thread(target=sender_loop,       args=(stop_event,),                                                   daemon=True, name="playback"),
     ]
     for t in threads:
         t.start()
@@ -106,6 +120,14 @@ def main():
     finally:
         stop_event.set()
         heartbeat_event.set()
+        # Даём циклу плеера закрыть текущий показ, затем досылаем очередь:
+        # без этого статистика последнего сеанса ушла бы только после
+        # следующего запуска агента.
+        time.sleep(0.7)
+        try:
+            flush_once()
+        except Exception as e:
+            print(f"[PLAYBACK] финальная отправка не удалась: {e}")
         mpv.stop()
         cap_live.release()
         cv2.destroyAllWindows()

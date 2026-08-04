@@ -66,8 +66,8 @@ read -rp "X offset второго монитора, px [1920]: " MONITOR_X_OFFSE
 MONITOR_X_OFFSET="${MONITOR_X_OFFSET:-1920}"
 read -rp "Sync interval, сек [300]: " SYNC_INTERVAL
 SYNC_INTERVAL="${SYNC_INTERVAL:-300}"
-read -rp "Heartbeat interval, сек [30]: " HEARTBEAT_INTERVAL
-HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"
+read -rp "Heartbeat interval, сек [15]: " HEARTBEAT_INTERVAL
+HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-15}"
 
 # --- пакеты (минимум) ---------------------------------------------------------
 echo ""

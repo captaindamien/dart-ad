@@ -20,11 +20,137 @@ import os
 from adplayer.state import StateManager, STATE_LIVE, STATE_VIDEO
 from adplayer.api import sync_loop, heartbeat_loop, heartbeat_event, get_playlist
 from adplayer.player import video_thread_fn
+from adplayer.playback import sender_loop
 from adplayer.config import ADS_DIR, MACHINE_TOKEN, SERVER_URL
 
 # Опционально: путь к видеофайлу для имитации «живого» источника.
 # None — генерируется синий фон с таймером.
 LIVE_VIDEO_PATH = None
+
+
+class MockMpvPlayer:
+    """
+    Мок MpvPlayer для локального dev-режима: повторяет публичный API
+    adplayer.mpv_player.MpvPlayer, но вместо внешнего процесса mpv декодирует
+    видео через OpenCV и пишет кадры в shared["video_frame"], которые dev.py
+    рисует в общем cv2-окне.
+    """
+
+    def __init__(self, shared):
+        self._shared      = shared
+        self._lock        = threading.Lock()
+        self._playlist    = []
+        self._idx         = 0
+        self._cap         = None
+        self._current     = None
+        self._is_paused   = True
+        self._restart     = False
+        self._stop_event  = threading.Event()
+        self._thread      = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True, name="mock-mpv")
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        with self._lock:
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+
+    def set_playlist(self, paths):
+        paths = list(paths)
+        with self._lock:
+            if paths == self._playlist:
+                return
+            self._playlist = paths
+            self._idx      = 0
+            self._open_current_locked()
+
+    def play(self):
+        self._is_paused = False
+
+    def pause_and_hide(self):
+        self._is_paused = True
+
+    def restart_current(self):
+        self._restart = True
+
+    def current_filename(self):
+        return self._current
+
+    def playback_time(self):
+        """Позиция в ролике — по ней учёт показов отличает повтор от продолжения."""
+        with self._lock:
+            if self._cap is None:
+                return None
+            pos_ms = self._cap.get(cv2.CAP_PROP_POS_MSEC)
+        return pos_ms / 1000.0 if pos_ms and pos_ms > 0 else 0.0
+
+    def duration(self):
+        """Длина ролика — по ней учёт показов отличает досмотр от обрыва."""
+        with self._lock:
+            if self._cap is None:
+                return None
+            frames = self._cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            fps    = self._cap.get(cv2.CAP_PROP_FPS)
+        if not frames or not fps or fps <= 0:
+            return None
+        return frames / fps
+
+    @property
+    def is_paused(self):
+        return self._is_paused
+
+    def _open_current_locked(self):
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+        if not self._playlist:
+            self._current = None
+            return
+        path = self._playlist[self._idx]
+        # _current обнуляется только при неудаче: если сбрасывать его до
+        # открытия файла, поток плеера успевает прочитать None на зацикливании
+        # и оформляет лишний показ. Настоящий mpv так не делает.
+        cap  = cv2.VideoCapture(path)
+        if cap.isOpened():
+            self._cap     = cap
+            self._current = os.path.basename(path)
+            print(f"[MOCK-MPV] open {self._current}")
+        else:
+            self._current = None
+            print(f"[MOCK-MPV] не удалось открыть {path}")
+
+    def _run(self):
+        fps_delay = 1.0 / 30
+        last_time = 0.0
+        while not self._stop_event.is_set():
+            now = time.time()
+            if now - last_time < fps_delay:
+                time.sleep(0.005)
+                continue
+            last_time = now
+
+            with self._lock:
+                if self._is_paused or self._cap is None:
+                    continue
+
+                if self._restart:
+                    self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    self._restart = False
+
+                ret, frame = self._cap.read()
+                if not ret:
+                    if self._playlist:
+                        self._idx = (self._idx + 1) % len(self._playlist)
+                        self._open_current_locked()
+                    continue
+
+                self._shared["video_frame"] = frame
 
 
 def on_state_change(old, new, duration):
@@ -105,6 +231,9 @@ def main():
     cap_live   = _make_live_source()
     sm         = StateManager(on_change_callback=on_state_change)
     shared     = {"live_frame": None, "video_frame": None, "video_restart": False, "current_video": None}
+    mpv        = MockMpvPlayer(shared)
+    shared["mpv"] = mpv
+    mpv.start()
     stop_event = threading.Event()
 
     threads = [
@@ -112,6 +241,8 @@ def main():
         threading.Thread(target=heartbeat_loop,  args=(shared, stop_event, sm),        daemon=True, name="heartbeat"),
         threading.Thread(target=live_thread_fn,  args=(cap_live, shared, stop_event),  daemon=True, name="live"),
         threading.Thread(target=video_thread_fn, args=(shared, stop_event, sm),        daemon=True, name="video"),
+        # Без этого потока показы копились бы в файле очереди и никогда не уходили.
+        threading.Thread(target=sender_loop,     args=(stop_event,),                  daemon=True, name="playback"),
     ]
     for t in threads:
         t.start()
@@ -153,6 +284,7 @@ def main():
 
     stop_event.set()
     heartbeat_event.set()
+    mpv.stop()
     if cap_live is not None:
         cap_live.release()
     cv2.destroyAllWindows()
