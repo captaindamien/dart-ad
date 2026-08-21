@@ -32,6 +32,7 @@ ILSport Dart Ad Player — точка входа для продакшена.
   X_offset — горизонтальное смещение второго монитора (по умолчанию 1440)
 """
 
+import signal
 import sys
 import time
 import threading
@@ -50,6 +51,17 @@ from adplayer.mpv_player import MpvPlayer
 
 MONITOR_X_OFFSET = int(sys.argv[1]) if len(sys.argv) > 1 else 1440
 
+# update.sh обновляет агента через `pkill -f "python3 .*main.py"`, то есть
+# SIGTERM. По умолчанию Python на нём завершается немедленно, минуя finally, —
+# mpv.stop() не вызывался и внешний плеер оставался осиротевшим fullscreen-окном
+# поверх экрана, которого новый агент уже не контролирует.
+_shutdown = threading.Event()
+
+
+def _on_signal(signum, _frame):
+    print(f"[MAIN] сигнал {signum} — завершаюсь")
+    _shutdown.set()
+
 
 def on_state_change(old, new, duration):
     print(f"[STATE] {old} → {new}, duration={duration:.2f}s")
@@ -57,6 +69,9 @@ def on_state_change(old, new, duration):
 
 
 def main():
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT,  _on_signal)
+
     try:
         subprocess.Popen(['unclutter', '-idle', '0', '-root'])
     except FileNotFoundError:
@@ -110,7 +125,7 @@ def main():
     print(f"\nЗапущено. SERVER_URL={SERVER_URL}, ADS_DIR={ADS_DIR}, монитор X={MONITOR_X_OFFSET}. Нажмите 'q' для выхода.\n")
 
     try:
-        while True:
+        while not _shutdown.is_set():
             if sm.state == STATE_LIVE:
                 frame = shared["live_frame"]
                 if frame is not None:

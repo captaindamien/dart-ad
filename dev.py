@@ -9,6 +9,15 @@ dev.py — локальная эмуляция без capture card и второ
   2       — симулировать marker2 (VIDEO → LIVE)
   r       — сбросить в STATE_LIVE
   q / Esc — выход
+
+Режим настоящей детекции (клавиши 1/2 отключаются):
+  DEV_DETECT=/path/screen.mp4 python3 dev.py   — запись экрана автомата
+  DEV_DETECT=0 python3 dev.py                  — камера/карта захвата по номеру
+  MARKER_DEBUG=1 ...                           — печатать fps и отклики маркеров
+
+Без него dev-режим обходит capture_thread_fn стороной: путь marker2 → LIVE
+не проверялся локально ни разу, из-за чего регрессия в частоте детекта и
+доехала до автоматов незамеченной.
 """
 
 import cv2
@@ -16,16 +25,24 @@ import numpy as np
 import threading
 import time
 import os
+import sys
 
 from adplayer.state import StateManager, STATE_LIVE, STATE_VIDEO
 from adplayer.api import sync_loop, heartbeat_loop, heartbeat_event, get_playlist
 from adplayer.player import video_thread_fn
 from adplayer.playback import sender_loop
-from adplayer.config import ADS_DIR, MACHINE_TOKEN, SERVER_URL
+from adplayer.capture import capture_thread_fn, load_markers
+from adplayer.config import (
+    ADS_DIR, MACHINE_TOKEN, SERVER_URL, MARKER1_PATH, MARKER2_PATH,
+)
 
 # Опционально: путь к видеофайлу для имитации «живого» источника.
 # None — генерируется синий фон с таймером.
 LIVE_VIDEO_PATH = None
+
+# Прогон настоящей детекции маркеров вместо клавиш 1/2: путь к видеофайлу
+# с записью экрана автомата либо номер камеры/карты захвата.
+DEV_DETECT = os.environ.get("DEV_DETECT", "")
 
 
 class MockMpvPlayer:
@@ -158,6 +175,43 @@ def on_state_change(old, new, duration):
     heartbeat_event.set()
 
 
+class _LoopingCapture:
+    """
+    Источник кадров для capture_thread_fn: зацикливает видеофайл и отдаёт кадры
+    в темпе его собственного fps.
+
+    Темп важен — без него файл проигрывается на скорости диска, и замер fps
+    обработки вместе с окном дебаунса теряет всякий смысл.
+    """
+
+    def __init__(self, source):
+        self._cap = cv2.VideoCapture(source)
+        fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self._delay = 1.0 / fps if fps > 0 else 1.0 / 30
+        self._next  = time.time()
+
+    def isOpened(self):
+        return self._cap.isOpened()
+
+    def read(self):
+        now = time.time()
+        if now < self._next:
+            time.sleep(self._next - now)
+        self._next = max(self._next + self._delay, time.time())
+
+        ret, frame = self._cap.read()
+        if not ret:
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = self._cap.read()
+        return ret, frame
+
+    def set(self, *args):
+        return self._cap.set(*args)
+
+    def release(self):
+        self._cap.release()
+
+
 def _make_live_source():
     if LIVE_VIDEO_PATH and os.path.exists(LIVE_VIDEO_PATH):
         cap = cv2.VideoCapture(LIVE_VIDEO_PATH)
@@ -216,7 +270,9 @@ def _draw_hud(frame, sm, shared):
     cv2.putText(frame,
                 f"[DEV]  {state_label}   {elapsed:.1f}s   trans:{sm.transitions}   pl:{pl_count}{video_info}",
                 (10, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, state_color, 2, cv2.LINE_AA)
-    cv2.putText(frame, "1=AD  2=LIVE  r=reset  q=quit",
+    hint = ("detect: marker in frame   q=quit" if DEV_DETECT
+            else "1=AD  2=LIVE  r=reset  q=quit")
+    cv2.putText(frame, hint,
                 (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1, cv2.LINE_AA)
     return frame
 
@@ -228,7 +284,20 @@ def main():
     print(f"  MACHINE_TOKEN= {'✓ set' if MACHINE_TOKEN else '✗ NOT SET — sync/heartbeat disabled'}")
     print()
 
-    cap_live   = _make_live_source()
+    detect_mode = bool(DEV_DETECT)
+    markers     = None
+
+    if detect_mode:
+        source   = int(DEV_DETECT) if DEV_DETECT.isdigit() else DEV_DETECT
+        cap_live = _LoopingCapture(source)
+        if not cap_live.isOpened():
+            print(f"[DEV] не удалось открыть DEV_DETECT={DEV_DETECT}")
+            sys.exit(1)
+        markers = load_markers(MARKER1_PATH, MARKER2_PATH)
+        print(f"[DEV] режим настоящей детекции: {DEV_DETECT} (клавиши 1/2 отключены)")
+    else:
+        cap_live = _make_live_source()
+
     sm         = StateManager(on_change_callback=on_state_change)
     shared     = {"live_frame": None, "video_frame": None, "video_restart": False, "current_video": None}
     mpv        = MockMpvPlayer(shared)
@@ -239,6 +308,13 @@ def main():
     threads = [
         threading.Thread(target=sync_loop,       args=(stop_event,),                  daemon=True, name="sync"),
         threading.Thread(target=heartbeat_loop,  args=(shared, stop_event, sm),        daemon=True, name="heartbeat"),
+        # В режиме детекции кадры читает и анализирует боевой capture_thread_fn —
+        # тот же код, что и на автомате.
+        threading.Thread(
+            target=capture_thread_fn,
+            args=(cap_live, markers[0], markers[1], shared, stop_event, sm),
+            daemon=True, name="capture",
+        ) if detect_mode else
         threading.Thread(target=live_thread_fn,  args=(cap_live, shared, stop_event),  daemon=True, name="live"),
         threading.Thread(target=video_thread_fn, args=(shared, stop_event, sm),        daemon=True, name="video"),
         # Без этого потока показы копились бы в файле очереди и никогда не уходили.
@@ -251,7 +327,10 @@ def main():
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, 854, 480)
 
-    print("Управление: 1=AD  2=LIVE  r=reset  q/Esc=quit")
+    if detect_mode:
+        print("Управление: q/Esc=quit (состояние переключают маркеры в кадре)")
+    else:
+        print("Управление: 1=AD  2=LIVE  r=reset  q/Esc=quit")
     print("Ждём первой синхронизации плейлиста…")
 
     while True:
@@ -263,7 +342,10 @@ def main():
 
         key = cv2.waitKey(16) & 0xFF
 
-        if key == ord("1"):
+        if key in (ord("1"), ord("2"), ord("r")) and detect_mode:
+            print("[DEV] режим настоящей детекции — переключай состояние маркером в кадре")
+
+        elif key == ord("1"):
             if sm.state == STATE_LIVE:
                 sm.transition(STATE_VIDEO)
                 shared["video_restart"] = True

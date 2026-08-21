@@ -64,21 +64,31 @@ class MpvPlayer:
 
         deadline = time.time() + 10.0
         while time.time() < deadline:
-            if not os.path.exists(self.socket_path):
-                time.sleep(0.1)
-                continue
-            try:
-                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                s.connect(self.socket_path)
-                self._sock = s
+            if self._connect():
                 return
-            except OSError:
-                time.sleep(0.1)
+            time.sleep(0.1)
         raise RuntimeError(f"mpv IPC socket {self.socket_path} not ready")
+
+    def _connect(self):
+        """
+        Подключение к IPC-сокету. Зовётся и при старте, и из _send после обрыва:
+        без переподключения первая же ошибка сокета навсегда превращала все
+        команды — включая pause_and_hide() — в молчаливый no-op, и реклама
+        продолжала играть поверх трансляции.
+        """
+        if not os.path.exists(self.socket_path):
+            return False
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(self.socket_path)
+        except OSError:
+            return False
+        self._sock = sock
+        return True
 
     def _send(self, command, expect_response=False, timeout=1.0):
         with self._lock:
-            if self._sock is None:
+            if self._sock is None and not self._connect():
                 return None
             self._req_id += 1
             req = {"command": command, "request_id": self._req_id}
