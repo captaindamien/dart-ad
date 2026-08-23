@@ -5,7 +5,13 @@
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/ilsport/dart-ad}"
-LOG="/var/log/ilsport-update.log"
+# Лог пишем от своего имени. Раньше здесь был /var/log через `sudo tee`, но юнит
+# крутится под обычным пользователем и без tty: sudo просил пароль и умирал
+# мгновенно, tee не стартовал, а весь блок ниже писал в оборванный pipe. Первый
+# же вывод (git reset --hard печатает «HEAD is now at …») ловил SIGPIPE и убивал
+# subshell — файлы обновлялись, а до pkill выполнение не доходило никогда.
+# Итог: код на диске новый, а плеер месяцами крутил в памяти старый.
+LOG="${LOG_FILE:-${HOME:-/tmp}/.ilsport-update.log}"
 
 ts() { date -Iseconds; }
 
@@ -50,4 +56,4 @@ ts() { date -Iseconds; }
   fi
 
   echo "[$(ts)] === update done ==="
-} | sudo tee -a "$LOG" >/dev/null
+} 2>&1 | tee -a "$LOG" >/dev/null

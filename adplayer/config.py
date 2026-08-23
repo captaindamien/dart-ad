@@ -39,7 +39,7 @@ def _load_dotenv(path):
 
 _load_dotenv(os.path.join(_ROOT, ".env"))
 
-AGENT_VERSION      = "1.2.1"
+AGENT_VERSION      = "1.2.2"
 
 MACHINE_TOKEN      = os.environ.get("MACHINE_TOKEN", "")
 SERVER_URL         = os.environ.get("SERVER_URL", "http://localhost:3000").rstrip("/")

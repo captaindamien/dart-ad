@@ -110,8 +110,13 @@ bash /opt/ilsport/dart-ad/raspberry-pi-setup/setup-watchdog.sh
 
 ```bash
 sudo systemctl start ilsport-update.service
-tail /var/log/ilsport-update.log
+tail ~/.ilsport-update.log
 ```
+
+Лог лежит в домашней директории, а не в `/var/log`: юнит работает под обычным
+пользователем без tty, и `sudo` в скрипте раньше молча ломал всё обновление —
+файлы обновлялись, а плеер не перезапускался. Дублируется в journald:
+`journalctl -u ilsport-update`.
 
 ## Headless-отладка (без второго монитора)
 
