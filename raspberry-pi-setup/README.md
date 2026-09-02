@@ -38,16 +38,23 @@ curl -fsSL https://raw.githubusercontent.com/captaindamien/dart-ad/master/raspbe
 2. `git clone` в `/opt/ilsport/dart-ad` (или `git pull`, если уже есть).
 3. Запишется `/etc/ilsport/env` (mode 640, owner `root:$USER`).
 4. Сгенерируется `~/.ssh/ilsport_tunnel(.pub)`.
-5. Дёрнется `POST /api/display/register-tunnel`, порт допишется в env.
+5. Дёрнется `POST /api/display/register-tunnel` с публичным ключом Pi: порт допишется в env, ключ Pi сохранится на сервере (sshd выдаёт его через AuthorizedKeysCommand), а ключ сервера из ответа ляжет в `~/.ssh/authorized_keys` — для веб-терминала дэшборда.
 6. Установятся 4 systemd-юнита: `ilsport-tunnel.service`, `ilsport-update.{service,timer}`, `ilsport-dart-ad.service` (последний — headless-fallback, **не enable**).
 7. В `~/.config/autostart/dart-ad-kiosk.desktop` ляжет autostart, который при логине в X-сессию поднимает плеер через `~/.ilsport-kiosk-autostart.sh`.
-8. В консоль выведется публичный ключ и инструкция, что делать дальше.
+8. Туннель стартует сразу — ключи уже обменяны. Если сервер не вернул `server_public_key` (бэкенд без автообмена), скрипт выведет публичный ключ и переключится в ручной режим (см. ниже).
 
 Перезагрузка после `setup.sh` **не нужна**.
 
 ## После установки
 
-### 1. Авторизовать ключ Pi на сервере
+### 1. Проверить туннель
+
+```bash
+systemctl status ilsport-tunnel
+journalctl -u ilsport-tunnel -f
+```
+
+### Ручной режим (fallback — если сервер не вернул server_public_key)
 
 Скрипт в конце выводит содержимое `~/.ssh/ilsport_tunnel.pub`. Передай его админу сервера, чтобы он добавил в `~tunnel/.ssh/authorized_keys` с ограничениями:
 
@@ -55,7 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/captaindamien/dart-ad/master/raspbe
 restrict,port-forwarding,command="echo tunnel only" ssh-ed25519 AAAA... ilsport-pi-<hostname>
 ```
 
-И в `/etc/ssh/sshd_config` сервера:
+И в `/etc/ssh/sshd_config` сервера (разово; для автообмена там же нужен блок `Match User tunnel` с `AuthorizedKeysCommand` — см. `docs/tunnel-keys-server-setup.md` в репо ilsport):
 
 ```
 GatewayPorts no
@@ -63,7 +70,7 @@ AllowTcpForwarding yes
 PermitOpen localhost:22100-22199
 ```
 
-### 2. Запустить туннель
+Ключ сервера для веб-терминала — вручную в `~/.ssh/authorized_keys` на Pi. Затем:
 
 ```bash
 sudo systemctl start ilsport-tunnel

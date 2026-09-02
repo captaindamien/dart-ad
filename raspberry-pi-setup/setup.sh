@@ -146,25 +146,49 @@ if [[ ! -f "$SSH_KEY" ]]; then
   ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -C "ilsport-pi-$(hostname)"
 fi
 
-# --- регистрация порта туннеля -----------------------------------------------
-echo ">>> Регистрирую tunnel port на сервере…"
-REG_RESP="$(curl -fsS -X POST -H "X-Machine-Token: $MACHINE_TOKEN" \
+# --- регистрация туннеля + автообмен ключами ----------------------------------
+echo ">>> Регистрирую tunnel port и обмениваюсь ключами с сервером…"
+# Серверу шлём ровно "ssh-ed25519 <base64>" без комментария — так требует валидатор.
+PUB_KEY="$(awk '{print $1" "$2}' "$SSH_KEY.pub")"
+REG_RESP="$(curl -fsS -X POST \
+  -H "X-Machine-Token: $MACHINE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"public_key\":\"$PUB_KEY\"}" \
   "$SERVER_URL/api/display/register-tunnel" || true)"
-TUNNEL_PORT="$(python3 - "$REG_RESP" <<'PY' 2>/dev/null || true
+
+json_field() {  # json_field <json> <key>
+  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     d = json.loads(sys.argv[1])
-    print((d.get("data") or d).get("port", ""))
+    v = (d.get("data") or d).get(sys.argv[2])
+    if v is not None:
+        print(v)
 except Exception:
     pass
 PY
-)"
+}
+TUNNEL_PORT="$(json_field "$REG_RESP" port)"
+SERVER_PUB_KEY="$(json_field "$REG_RESP" server_public_key)"
+
 if [[ -z "$TUNNEL_PORT" ]]; then
   echo "    не удалось получить порт автоматически (ответ: ${REG_RESP:-<пусто>})"
   read -rp "    введи tunnel port вручную: " TUNNEL_PORT
 fi
 echo "    tunnel port = $TUNNEL_PORT"
 echo "TUNNEL_PORT=$TUNNEL_PORT" | sudo tee -a "$ENV_FILE" >/dev/null
+
+# Ключ сервера — в authorized_keys, чтобы веб-терминал дэшборда мог заходить.
+# Пишем только то, что похоже на ключ — защита от мусора в ответе.
+if [[ -n "$SERVER_PUB_KEY" && "$SERVER_PUB_KEY" =~ ^ssh-(ed25519|rsa)\ [A-Za-z0-9+/=]+ ]]; then
+  AUTH_KEYS="$SSH_DIR/authorized_keys"
+  touch "$AUTH_KEYS"; chmod 600 "$AUTH_KEYS"
+  grep -qxF "$SERVER_PUB_KEY" "$AUTH_KEYS" || echo "$SERVER_PUB_KEY" >> "$AUTH_KEYS"
+  echo "    ключ сервера добавлен в $AUTH_KEYS — веб-терминал заработает сразу"
+else
+  SERVER_PUB_KEY=""
+  echo "    сервер не вернул server_public_key — обмен ключами в ручном режиме (см. финал)"
+fi
 
 # --- systemd units ------------------------------------------------------------
 echo ">>> Устанавливаю systemd units…"
@@ -188,8 +212,20 @@ install -m 755 "$SETUP_DIR_SRC/kiosk-autostart.sh" "$SERVICE_HOME/.ilsport-kiosk
 # --- enable timers/services ---------------------------------------------------
 echo ">>> Активирую update.timer и tunnel.service…"
 sudo systemctl enable --now ilsport-update.timer
-sudo systemctl enable ilsport-tunnel.service
-# tunnel НЕ стартуем сразу — нужен загруженный публичный ключ на сервере.
+TUNNEL_STARTED=0
+if [[ -n "$SERVER_PUB_KEY" ]]; then
+  # Ключ автомата уже на сервере (AuthorizedKeysCommand) — стартуем сразу.
+  sudo systemctl enable --now ilsport-tunnel.service
+  sleep 5
+  if systemctl is-active --quiet ilsport-tunnel.service; then
+    TUNNEL_STARTED=1
+  else
+    echo "    туннель пока не поднялся — autossh ретраит каждые 15 с (journalctl -u ilsport-tunnel -f)"
+  fi
+else
+  # Старый бэкенд без автообмена: нужен загруженный публичный ключ на сервере.
+  sudo systemctl enable ilsport-tunnel.service
+fi
 # dart-ad.service не enable — основной запуск идёт из X-autostart.
 
 # --- финал --------------------------------------------------------------------
@@ -197,13 +233,20 @@ echo ""
 echo "=========================================================="
 echo "Установка завершена."
 echo ""
-echo "1. Передай этот публичный ключ админу сервера:"
-echo ""
-cat "$SSH_KEY.pub"
-echo ""
-echo "2. Когда ключ авторизован на сервере — стартуй туннель:"
-echo "     sudo systemctl start ilsport-tunnel"
-echo "     journalctl -u ilsport-tunnel -f"
+if [[ "$TUNNEL_STARTED" -eq 1 ]]; then
+  echo "1. Ключи обменяны с сервером автоматически, туннель уже запущен —"
+  echo "   ручная раскладка ключей не нужна. Проверка:"
+  echo "     systemctl status ilsport-tunnel"
+else
+  echo "1. Передай этот публичный ключ админу сервера"
+  echo "   (в /home/tunnel/.ssh/authorized_keys, см. INSTALL.md → Ручной режим):"
+  echo ""
+  cat "$SSH_KEY.pub"
+  echo ""
+  echo "2. Когда ключ авторизован на сервере — стартуй туннель:"
+  echo "     sudo systemctl start ilsport-tunnel"
+  echo "     journalctl -u ilsport-tunnel -f"
+fi
 echo ""
 echo "3. Чтобы плеер поднялся — нужно войти в графическую X-сессию"
 echo "   под пользователем $SERVICE_USER (физически или через autologin)."
