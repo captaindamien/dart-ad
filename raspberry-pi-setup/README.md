@@ -22,7 +22,7 @@ bash ~/dart-ad/raspberry-pi-setup/setup.sh
 или одной строкой:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/captaindamien/dart-ad/master/raspberry-pi-setup/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/captaindamien/dart-ad/main/raspberry-pi-setup/setup.sh | bash
 ```
 
 Скрипт спросит:

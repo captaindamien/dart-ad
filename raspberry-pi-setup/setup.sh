@@ -8,7 +8,7 @@
 #   git clone https://github.com/captaindamien/dart-ad.git ~/dart-ad
 #   bash ~/dart-ad/raspberry-pi-setup/setup.sh
 # или одной строкой:
-#   curl -fsSL https://raw.githubusercontent.com/captaindamien/dart-ad/master/raspberry-pi-setup/setup.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/captaindamien/dart-ad/main/raspberry-pi-setup/setup.sh | bash
 
 set -euo pipefail
 
