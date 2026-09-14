@@ -24,6 +24,19 @@ ts() { date -Iseconds; }
   git reset --hard "origin/$(git rev-parse --abbrev-ref HEAD)"
   AFTER="$(git rev-parse HEAD)"
 
+  # ~/.ilsport-kiosk-autostart.sh — копия из репозитория, которую кладёт
+  # setup.sh; сам git reset её не трогает, и правки в ней (ротация лога)
+  # до установленных автоматов раньше не доезжали вовсе. Сверяем по
+  # содержимому, а не по диффу коммитов: bash, уже исполняющий этот файл,
+  # дочитывает старый inode, поэтому на прогоне с новым update.sh коммиты
+  # «те же», а копия ещё старая. Вступит в силу после перезапуска X-сессии.
+  KIOSK_SRC="$INSTALL_DIR/raspberry-pi-setup/kiosk-autostart.sh"
+  KIOSK_DST="${HOME:-/tmp}/.ilsport-kiosk-autostart.sh"
+  if [[ -f "$KIOSK_SRC" && -f "$KIOSK_DST" ]] && ! cmp -s "$KIOSK_SRC" "$KIOSK_DST"; then
+    install -m 755 "$KIOSK_SRC" "$KIOSK_DST"
+    echo "[$(ts)] kiosk-autostart.sh обновлён (применится после перезагрузки)"
+  fi
+
   if [[ "$BEFORE" == "$AFTER" ]]; then
     echo "[$(ts)] no changes ($BEFORE)"
     exit 0
