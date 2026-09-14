@@ -49,6 +49,13 @@ PIDFILE="/run/ilsport-dart-ad.pid"
 echo "[$(date -Iseconds)] kiosk-autostart up; INSTALL_DIR=$INSTALL_DIR offset=$MONITOR_X_OFFSET" >> "$LOG"
 
 while true; do
+  # Перечитываем env перед каждым запуском. Обёртка живёт всю X-сессию, и
+  # раньше main.py получал окружение, прочитанное при логине: исправленный
+  # на диске SERVER_URL двое суток не доезжал до плеера, пока Pi не
+  # перезагрузят. Теперь достаточно перезапуска плеера (его делает update.sh).
+  [[ -f "$ENV_FILE" ]] && set -a && source "$ENV_FILE" && set +a
+  INSTALL_DIR="${INSTALL_DIR:-/opt/ilsport/dart-ad}"
+  MONITOR_X_OFFSET="${MONITOR_X_OFFSET:-1920}"
   rotate_log
   cd "$INSTALL_DIR" || { echo "[$(date -Iseconds)] no $INSTALL_DIR" >> "$LOG"; sleep 10; continue; }
   python3 -u main.py "$MONITOR_X_OFFSET" >> "$LOG" 2>&1 &

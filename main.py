@@ -44,6 +44,11 @@ import time
 import threading
 import subprocess
 
+import os
+# До первого import cv2: варнинги videoio читаются из окружения при загрузке
+# библиотеки, cv2.utils.logging на OpenCV 4.6 (Bookworm) их не глушит.
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+
 import cv2
 import numpy as np
 

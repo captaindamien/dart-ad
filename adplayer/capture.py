@@ -1,6 +1,8 @@
+import fcntl
 import glob
 import os
 import re
+import struct
 import time
 
 import cv2
@@ -18,13 +20,56 @@ from .state import STATE_LIVE, STATE_VIDEO, FAULT_CAPTURE_LOST, FAULT_AD_STUCK
 # устройство печатает в stderr по четыре строки варнингов. Пока агент ждёт
 # карту захвата, перебор идёт в цикле — на стенде это давало ~28 МБ лога
 # в сутки. Явный CAP_V4L2 в open_capture() убирает GStreamer из цепочки,
-# а уровень логирования глушит остатки.
+# уровень логирования глушит остатки. Основной рубильник — переменная
+# OPENCV_LOG_LEVEL, выставленная в main.py/dev.py до первого import cv2:
+# cv2.utils.logging на OpenCV 4.6 из Bookworm варнинги videoio не гасит.
 try:
     cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
 except AttributeError:  # старая сборка OpenCV без cv2.utils.logging
     pass
 
 _VIDEO_DEV_RE = re.compile(r"/dev/video(\d+)$")
+
+# VIDIOC_QUERYCAP = _IOR('V', 0, struct v4l2_capability), sizeof == 104.
+_VIDIOC_QUERYCAP               = 0x80685600
+_V4L2_CAP_VIDEO_CAPTURE        = 0x00000001
+_V4L2_CAP_VIDEO_CAPTURE_MPLANE = 0x00001000
+_V4L2_CAP_VIDEO_M2M_MPLANE     = 0x00004000
+_V4L2_CAP_VIDEO_M2M            = 0x00008000
+_V4L2_CAP_DEVICE_CAPS          = 0x80000000
+
+
+def _v4l2_caps(path):
+    """device_caps узла, либо None, если спросить не удалось."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        buf = bytearray(104)
+        fcntl.ioctl(fd, _VIDIOC_QUERYCAP, buf)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    caps, dev_caps = struct.unpack_from("<II", buf, 84)
+    return dev_caps if caps & _V4L2_CAP_DEVICE_CAPS else caps
+
+
+def _looks_like_capture(path):
+    """
+    Стоит ли вообще открывать узел через OpenCV. На Pi 5 семнадцать встроенных
+    узлов (pispbe, rpi-hevc-dec) — M2M-кодеки: картинку не отдают, а cap.read()
+    на каждом висит до select() timeout, и полный перебор без карты захвата
+    занимал 40–60 секунд. Спрашиваем ядро напрямую и пропускаем всё, что не
+    умеет захват. Не смогли спросить — пробуем открыть, как раньше.
+    """
+    caps = _v4l2_caps(path)
+    if caps is None:
+        return True
+    if caps & (_V4L2_CAP_VIDEO_M2M | _V4L2_CAP_VIDEO_M2M_MPLANE):
+        return False
+    return bool(caps & (_V4L2_CAP_VIDEO_CAPTURE | _V4L2_CAP_VIDEO_CAPTURE_MPLANE))
 
 
 def _video_indices():
@@ -33,13 +78,13 @@ def _video_indices():
 
     На Pi 5 встроенные устройства (pispbe, rpi-hevc-dec) занимают номера
     19–35, и USB-карта, попавшая выше девятого, старым кодом не находилась
-    вообще. USB-устройства идут первыми: встроенные M2M-кодеки картинку не
-    отдают, и тратить на них попытки открытия незачем.
+    вообще. USB-устройства идут первыми, узлы без захвата отсеиваются по
+    QUERYCAP ещё до открытия.
     """
     usb, other = [], []
     for path in glob.glob("/dev/video*"):
         m = _VIDEO_DEV_RE.match(path)
-        if not m:
+        if not m or not _looks_like_capture(path):
             continue
         idx = int(m.group(1))
         link = os.path.realpath(f"/sys/class/video4linux/video{idx}")
