@@ -7,7 +7,7 @@ import time
 
 import cv2
 
-from .api import heartbeat_event
+from .api import heartbeat_event, get_playlist
 from .config import (
     DETECT_SCALE, DETECT_EVERY_N, THRESHOLD, DEBOUNCE_FRAMES,
     DEBOUNCE_MAX_GAP, MARKER_COOLDOWN, MARKER_DEBUG, STUCK_WARN_SEC, STUCK_EXIT_SEC,
@@ -353,6 +353,8 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
       * после STUCK_WARN_SEC серверу уходит fault=ad_stuck с диагностикой,
         чтобы проблему было видно в дэшборде, а не через сутки по логам;
       * STUCK_EXIT_SEC — выключенный по умолчанию аварийный рубильник.
+    Без роликов в плейлисте рекламный режим не включается вовсе, а если
+    плейлист опустел посреди рекламы — возвращаемся в трансляцию.
     """
     det            = _Detector(marker1_small, marker2_small)
     frame_count    = 0
@@ -360,6 +362,7 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
     deb_video      = _Debouncer()   # ждём marker2, чтобы вернуться к трансляции
     deb_rearm      = _Debouncer()   # marker1 во время рекламы — новый цикл
     rearm_armed    = True           # одна экспозиция marker1 = один перезапуск
+    noads_logged   = 0.0            # чтобы «плейлист пуст» не сыпалось на каждый кадр
     cooldown_until = 0.0
     checked_sizes  = False
     dbg            = _DebugMeter() if MARKER_DEBUG else None
@@ -486,6 +489,21 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
             deb_live.reset(); deb_video.reset(); deb_rearm.reset()
             continue
 
+        # --- нет роликов — нет и рекламного режима ------------------------------
+        # Пустой плейлист (первая установка, рекламу сняли, ролик ещё не
+        # докачался) раньше не мешал уйти в STATE_VIDEO: mpv показывать было
+        # нечего, а главный цикл в этом состоянии переставал рисовать живой
+        # кадр — нижний дисплей замирал на заставке до конца игры. Теперь без
+        # роликов автомат ведёт себя так, будто агента нет: трансляция идёт.
+        have_ads = bool(get_playlist())
+        if not in_live and not have_ads:
+            print("[STATE] плейлист опустел во время рекламы — возвращаюсь в трансляцию")
+            sm.transition(STATE_LIVE)
+            leave_video_diag()
+            deb_live.reset(); deb_video.reset(); deb_rearm.reset()
+            cooldown_until = now + MARKER_COOLDOWN
+            continue
+
         # --- основной переход по своему маркеру --------------------------------
         # Выход из рекламы по marker2 проверяется первым и имеет приоритет:
         # экран меню может одновременно давать высокий отклик и на marker1
@@ -495,11 +513,16 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
         deb = deb_live if in_live else deb_video
         if target_hit:
             if deb.hit(now, gap):
-                sm.transition(STATE_VIDEO if in_live else STATE_LIVE)
-                if in_live:
-                    shared["video_restart"] = True
+                if in_live and not have_ads:
+                    if now - noads_logged > 10.0:
+                        noads_logged = now
+                        print("[STATE] marker1, но плейлист пуст — остаюсь в трансляции")
                 else:
-                    leave_video_diag()
+                    sm.transition(STATE_VIDEO if in_live else STATE_LIVE)
+                    if in_live:
+                        shared["video_restart"] = True
+                    else:
+                        leave_video_diag()
                 deb_live.reset(); deb_video.reset(); deb_rearm.reset()
                 cooldown_until = now + MARKER_COOLDOWN
             continue

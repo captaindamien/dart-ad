@@ -203,7 +203,11 @@ def main():
 
     try:
         while not _shutdown.is_set():
-            if sm.state == STATE_LIVE:
+            # Живой кадр рисуем и в STATE_VIDEO, пока mpv ещё ничего не показывает
+            # (current_video пустой): иначе окно замирает на последнем кадре —
+            # заставке marker1 — на всё время, что ролика нет. При идущей рекламе
+            # mpv лежит поверх, и лишний imshow не стоит ничего заметного.
+            if sm.state == STATE_LIVE or shared.get("current_video") is None:
                 frame = shared["live_frame"]
                 if frame is not None:
                     cv2.imshow(win, frame)

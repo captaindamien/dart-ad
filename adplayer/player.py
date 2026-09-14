@@ -55,6 +55,15 @@ def video_thread_fn(shared, stop_event, sm):
             continue
 
         if not current_playlist:
+            # Плейлист опустел на ходу (рекламу сняли, sync удалил файлы):
+            # прячем mpv сразу, не дожидаясь, пока поток детекта вернёт
+            # STATE_LIVE, — иначе окно с уже удалённым роликом висит поверх
+            # трансляции лишние доли секунды.
+            if not mpv.is_paused:
+                mpv.pause_and_hide()
+                tracker.interrupt(position=_ask(mpv, "playback_time"))
+                set_current_video(None)
+                last_playlist = []
             time.sleep(0.5)
             continue
 
