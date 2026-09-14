@@ -56,10 +56,63 @@ fi
 echo ""
 
 # --- сбор конфигурации --------------------------------------------------------
-read -rp "Server URL (например https://ilsport.ae): " SERVER_URL
-read -rp "Machine Token (из админки): " MACHINE_TOKEN
-read -rp "Hostname сервера для SSH-туннеля [${SERVER_URL#*://}]: " SERVER_HOST
-SERVER_HOST="${SERVER_HOST:-${SERVER_URL#*://}}"
+# Проверка ввода здесь не формальность. На одном из автоматов в SERVER_URL
+# уехала кириллическая «р» вместо латинской h (раскладка при наборе):
+# curl отвергал такой адрес, register-tunnel молча провалился, а heartbeat не
+# уходил вообще — машина просто никогда не появилась в дэшборде, и найти
+# причину удалось только через двое суток. Ловим это на вводе.
+ascii_only() {  # ascii_only <строка> — 0, если только печатаемый ASCII
+  ! printf '%s' "$1" | LC_ALL=C grep -q '[^ -~]'
+}
+
+check_server() {  # check_server <url> <token> — печатает диагноз, возвращает 0/1
+  local code
+  # curl при обрыве связи и печатает 000, и возвращает ненулевой код — без
+  # `|| true` подстановка склеила бы вывод с запасным значением в «000000».
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+    -H "X-Machine-Token: $2" "$1/api/display/playlist" 2>/dev/null || true)"
+  code="${code:-000}"
+  case "$code" in
+    200)     echo "    OK: сервер отвечает, токен принят."; return 0 ;;
+    401|403) echo "    Сервер отверг Machine Token (HTTP $code) — проверь токен в админке." ;;
+    000)     echo "    Сервер недоступен по адресу $1 — проверь URL и сеть." ;;
+    *)       echo "    Неожиданный ответ HTTP $code от $1." ;;
+  esac
+  return 1
+}
+
+while :; do
+  read -rp "Server URL (например https://ilsport.ae): " SERVER_URL
+  SERVER_URL="$(printf '%s' "$SERVER_URL" | tr -d '[:space:]')"
+  SERVER_URL="${SERVER_URL%/}"
+  if ! ascii_only "$SERVER_URL"; then
+    echo "    В адресе непечатаемые или не-ASCII символы (кириллица?). Проверь раскладку и набери заново."
+    continue
+  fi
+  if [[ ! "$SERVER_URL" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+    echo "    Нужен адрес вида https://ilsport.ae — схема http/https, без пути в конце."
+    continue
+  fi
+
+  read -rp "Machine Token (из админки): " MACHINE_TOKEN
+  MACHINE_TOKEN="$(printf '%s' "$MACHINE_TOKEN" | tr -d '[:space:]')"
+  if [[ -z "$MACHINE_TOKEN" ]] || ! ascii_only "$MACHINE_TOKEN"; then
+    echo "    Токен пустой или содержит посторонние символы. Скопируй его из админки заново."
+    continue
+  fi
+
+  if ! command -v curl >/dev/null; then
+    echo "    curl ещё не установлен — связь проверим после установки пакетов."
+    break
+  fi
+  echo ">>> Проверяю связь с сервером…"
+  check_server "$SERVER_URL" "$MACHINE_TOKEN" && break
+  echo "    Повтори ввод."
+done
+
+DEFAULT_HOST="${SERVER_URL#*://}"; DEFAULT_HOST="${DEFAULT_HOST%%[:/]*}"
+read -rp "Hostname сервера для SSH-туннеля [$DEFAULT_HOST]: " SERVER_HOST
+SERVER_HOST="${SERVER_HOST:-$DEFAULT_HOST}"
 read -rp "Tunnel gateway user [tunnel]: " TUNNEL_USER
 TUNNEL_USER="${TUNNEL_USER:-tunnel}"
 read -rp "X offset второго монитора, px [1920]: " MONITOR_X_OFFSET
@@ -79,6 +132,14 @@ sudo apt-get install -y \
   mpv \
   unclutter wmctrl \
   autossh openssh-client
+
+# --- связь с сервером: добор проверки, если curl не было на старте ------------
+echo ""
+echo ">>> Проверяю связь с сервером…"
+if ! check_server "$SERVER_URL" "$MACHINE_TOKEN"; then
+  echo "    Установка прервана: без связи с сервером агент всё равно не заработает." >&2
+  exit 1
+fi
 
 # --- gpu_mem для V4L2 M2M H.264 декодера на Pi 4 ------------------------------
 # mpv с --hwdec=v4l2m2m-copy требует минимум ~128 MB GPU-памяти.
@@ -172,8 +233,17 @@ TUNNEL_PORT="$(json_field "$REG_RESP" port)"
 SERVER_PUB_KEY="$(json_field "$REG_RESP" server_public_key)"
 
 if [[ -z "$TUNNEL_PORT" ]]; then
-  echo "    не удалось получить порт автоматически (ответ: ${REG_RESP:-<пусто>})"
-  read -rp "    введи tunnel port вручную: " TUNNEL_PORT
+  # Раньше здесь предлагался ручной ввод порта — и это дважды выходило боком:
+  # введённый на глаз порт оказывался занят другим автоматом, а его ключ при
+  # этом на сервер не уехал, так что autossh уходил в вечный цикл рестартов
+  # раз в 15 секунд (счётчик доходил до 11 тысяч). Порт раздаёт только сервер.
+  echo "" >&2
+  echo "ОШИБКА: сервер не выдал tunnel port." >&2
+  echo "  ответ register-tunnel: ${REG_RESP:-<пусто>}" >&2
+  echo "  Порт назначает сервер и только он — вводить его вручную нельзя:" >&2
+  echo "  чужой порт уже занят другим автоматом, а ключ этой Pi на сервер не попал." >&2
+  echo "  Разберись с причиной (SERVER_URL, токен, доступность сервера) и запусти setup.sh заново." >&2
+  exit 1
 fi
 echo "    tunnel port = $TUNNEL_PORT"
 echo "TUNNEL_PORT=$TUNNEL_PORT" | sudo tee -a "$ENV_FILE" >/dev/null
@@ -202,6 +272,13 @@ for unit in dart-ad.service tunnel.service update.service update.timer; do
   render_unit "$SETUP_DIR_SRC/$unit" | sudo tee "/etc/systemd/system/ilsport-$unit" >/dev/null
 done
 sudo systemctl daemon-reload
+
+# --- sshd: без него обратный туннель бесполезен -------------------------------
+# Туннель пробрасывает 221xx на порт 22 самой Pi. В Raspberry Pi OS ssh выключен
+# по умолчанию, и на первых автоматах туннель поднимался, а веб-терминал дэшборда
+# всё равно упирался в «Connection reset»: на том конце никто не слушал.
+echo ">>> Включаю sshd (нужен для веб-терминала через обратный туннель)…"
+sudo systemctl enable --now ssh
 
 # --- kiosk autostart в X-сессии ----------------------------------------------
 echo ">>> Раскладываю kiosk-autostart в $SERVICE_HOME/.config/autostart/…"

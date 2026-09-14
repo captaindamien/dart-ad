@@ -8,7 +8,7 @@ from .config import (
     MACHINE_TOKEN, SERVER_URL, ADS_DIR, SYNC_INTERVAL, HEARTBEAT_INTERVAL, AGENT_VERSION,
 )
 from .metrics import get_system_metrics
-from .state import STATE_VIDEO
+from .state import STATE_VIDEO, HARDWARE_FAULTS
 
 _playlist_lock   = threading.Lock()
 _server_playlist = []
@@ -101,11 +101,17 @@ def sync_loop(stop_event):
         stop_event.wait(timeout=SYNC_INTERVAL)
 
 
-def _do_send_heartbeat(state, current_video):
+def _do_send_heartbeat(state, current_video, fault=None, fault_detail=None):
     if not MACHINE_TOKEN:
         return
     try:
-        payload = {"state": state, "current_video": current_video, "agent_version": AGENT_VERSION}
+        # fault/fault_detail уходят всегда, даже пустыми: по null сервер снимает
+        # прежнюю неисправность. Старый бэкенд незнакомые поля игнорирует.
+        payload = {
+            "state": state, "current_video": current_video, "agent_version": AGENT_VERSION,
+            "fault": fault or None,
+            "fault_detail": (fault_detail or None) and str(fault_detail)[:200],
+        }
         payload.update(get_system_metrics())
         body = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -115,17 +121,35 @@ def _do_send_heartbeat(state, current_video):
             method="POST",
         )
         urllib.request.urlopen(req, timeout=5)
-        print(f"[HB] state={state}, video={current_video}")
+        print(f"[HB] state={state}, video={current_video}"
+              + (f", fault={fault}" if fault else "")
+              + (f" ({fault_detail})" if fault and fault_detail else ""))
     except Exception as e:
         print(f"[HB] error: {e}")
 
 
 def heartbeat_loop(shared, stop_event, sm):
+    """
+    Хартбит уходит независимо от состояния железа — в этом весь смысл того,
+    что поток поднимается в main.py раньше поиска карты захвата. Пока
+    shared["fault"] непустой, серверу репортится state="error": бэкенд такое
+    значение принимает и не засчитывает в аптайм, но машина остаётся видимой
+    в дэшборде. Раньше агент в этой ситуации просто умирал, и включённая,
+    но не подключённая к автомату Pi выглядела как выключенная.
+    """
     while not stop_event.is_set():
         heartbeat_event.wait(timeout=HEARTBEAT_INTERVAL)
         heartbeat_event.clear()
         if stop_event.is_set():
             break
-        state = "playing" if sm.state == STATE_VIDEO else "idle"
-        current_video = shared.get("current_video") if sm.state == STATE_VIDEO else None
-        threading.Thread(target=_do_send_heartbeat, args=(state, current_video), daemon=True).start()
+        fault = shared.get("fault")
+        if fault in HARDWARE_FAULTS:
+            state, current_video = "error", None
+        else:
+            # ad_stuck и прочие «мягкие» неисправности не меняют состояние:
+            # реклама реально идёт, дэшборд не должен врать про экран.
+            state = "playing" if sm.state == STATE_VIDEO else "idle"
+            current_video = shared.get("current_video") if sm.state == STATE_VIDEO else None
+        threading.Thread(target=_do_send_heartbeat,
+                         args=(state, current_video, fault, shared.get("fault_detail")),
+                         daemon=True).start()

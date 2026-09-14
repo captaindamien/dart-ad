@@ -13,14 +13,20 @@ ILSport Dart Ad Player — точка входа для продакшена.
 показов рекламы. Показы копятся в файле на диске и досылаются пачками, поэтому
 обрыв связи или перезагрузка их не теряют.
 
+Порядок запуска намеренно таков: сначала heartbeat и синхронизация плейлиста,
+и только потом железо. Агент обязан быть виден в дэшборде даже тогда, когда
+карта захвата не подключена, — см. _wait_for_capture().
+
 Переменные окружения (из /etc/ilsport/env):
   SERVER_URL              — URL бэкенда (напр. https://your-server.com)
   MACHINE_TOKEN           — токен машины (X-Machine-Token)
   ADS_DIR                 — папка для видео (по умолчанию ./public/ads)
   SYNC_INTERVAL           — интервал синхронизации плейлиста, с (по умолчанию 300)
   HEARTBEAT_INTERVAL      — интервал хартбита, с (по умолчанию 15). Хартбит
-                            уходит и вне графика: при смене состояния и при
-                            смене текущего ролика
+                            уходит и вне графика: при смене состояния, при
+                            смене текущего ролика и при отказе оборудования
+  CAPTURE_RETRY_SEC       — пауза между попытками найти карту захвата, с (10)
+  CAPTURE_STALL_SEC       — сколько секунд без кадров считать отвалом карты (15)
   PLAYBACK_QUEUE_PATH     — файл очереди показов (~/.cache/ilsport/playback_queue.jsonl)
   PLAYBACK_FLUSH_INTERVAL — как часто досылать накопленные показы, с (60)
   PLAYBACK_BATCH_SIZE     — размер пачки (100, сервер принимает до 200)
@@ -41,10 +47,14 @@ import subprocess
 import cv2
 import numpy as np
 
-from adplayer.config import MARKER1_PATH, MARKER2_PATH, ADS_DIR, SERVER_URL
-from adplayer.state import StateManager, STATE_LIVE, STATE_VIDEO
+from adplayer.config import MARKER1_PATH, MARKER2_PATH, ADS_DIR, SERVER_URL, CAPTURE_RETRY_SEC
+from adplayer.state import (
+    StateManager, STATE_LIVE, STATE_VIDEO, FAULT_NO_CAPTURE, FAULT_NO_MARKERS,
+)
 from adplayer.api import sync_loop, heartbeat_loop, heartbeat_event
-from adplayer.capture import find_capture_device, load_markers, capture_thread_fn
+from adplayer.capture import (
+    find_capture_device, load_markers, capture_thread_fn, reopen_capture,
+)
 from adplayer.player import video_thread_fn
 from adplayer.playback import sender_loop, flush_once
 from adplayer.mpv_player import MpvPlayer
@@ -68,9 +78,63 @@ def on_state_change(old, new, duration):
     heartbeat_event.set()
 
 
+def _set_fault(shared, fault, detail=None):
+    """Смена неисправности всегда дёргает внеплановый хартбит — дэшборд не должен
+    ждать до минуты, чтобы узнать, что автомат остался без карты захвата."""
+    if shared.get("fault") != fault:
+        shared["fault"] = fault
+        shared["fault_detail"] = detail
+        heartbeat_event.set()
+
+
+def _wait_for_capture(shared, stop_event):
+    """
+    Ждём карту захвата вместо sys.exit(1).
+
+    Раньше её отсутствие убивало процесс, kiosk-autostart поднимал его заново
+    через 5 секунд, и так бесконечно: поток хартбита не успевал отправить ни
+    одного запроса. В дэшборде включённая, но не подключённая к автомату Pi
+    выглядела ровно как выключенная — отличить «стоит на столе» от «сгорела»
+    было нечем. Теперь процесс живёт, репортит state=error и сам подхватывает
+    карту, как только её воткнут: перезагрузка после монтажа не нужна.
+
+    Возвращает None только при завершении работы.
+    """
+    announced = False
+    while not _shutdown.is_set() and not stop_event.is_set():
+        cap, _ = find_capture_device(skip_first=False)
+        if cap is not None:
+            _set_fault(shared, None)
+            return cap
+        if not announced:
+            announced = True
+            _set_fault(shared, FAULT_NO_CAPTURE, "устройство /dev/video* с картинкой не найдено")
+            print(f"[CAPTURE] карта захвата не найдена — жду, повтор каждые "
+                  f"{CAPTURE_RETRY_SEC:.0f}s (в дэшборде машина видна как error)")
+        _shutdown.wait(CAPTURE_RETRY_SEC)
+    return None
+
+
 def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT,  _on_signal)
+
+    sm         = StateManager(on_change_callback=on_state_change)
+    shared     = {"live_frame": None, "video_restart": False, "current_video": None,
+                  "mpv": None, "cap": None, "fault": None, "fault_detail": None}
+    stop_event = threading.Event()
+
+    # Инфраструктурные потоки поднимаются до любого железа:
+    #   heartbeat — чтобы машина была видна в дэшборде даже без карты захвата;
+    #   sync      — чтобы ролики успели скачаться, пока Pi ждёт подключения
+    #               к автомату. Иначе первый же marker после установки уводил
+    #               в рекламу с ещё пустым плейлистом, и экран замирал на
+    #               последнем живом кадре на всё время загрузки.
+    for t in (
+        threading.Thread(target=heartbeat_loop, args=(shared, stop_event, sm), daemon=True, name="heartbeat"),
+        threading.Thread(target=sync_loop,      args=(stop_event,),            daemon=True, name="sync"),
+    ):
+        t.start()
 
     try:
         subprocess.Popen(['unclutter', '-idle', '0', '-root'])
@@ -80,15 +144,22 @@ def main():
     try:
         marker1_small, marker2_small = load_markers(MARKER1_PATH, MARKER2_PATH)
     except FileNotFoundError as e:
-        print(f"Ошибка: {e}"); sys.exit(1)
+        # Без маркеров агент бесполезен, но исчезнувшая из дэшборда машина хуже,
+        # чем машина в состоянии error: во втором случае хотя бы видно, что чинить.
+        # Файлы вернёт ближайший ilsport-update (git reset --hard), после чего
+        # kiosk-autostart перезапустит процесс.
+        print(f"Ошибка: {e}")
+        _set_fault(shared, FAULT_NO_MARKERS, str(e)[:200])
+        _shutdown.wait()
+        stop_event.set()
+        return
 
     print("Поиск устройства захвата…")
-    cap_live, _ = find_capture_device(skip_first=False)
+    cap_live = _wait_for_capture(shared, stop_event)
     if cap_live is None:
-        print("Ошибка: карта захвата не найдена."); sys.exit(1)
-    cap_live.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    cap_live.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    cap_live.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        stop_event.set()
+        return
+    shared["cap"] = cap_live
 
     win = "AD Display"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
@@ -107,17 +178,15 @@ def main():
     print("Запускаю mpv…")
     mpv = MpvPlayer(monitor_x=MONITOR_X_OFFSET)
     mpv.start()
-
-    sm         = StateManager(on_change_callback=on_state_change)
-    shared     = {"live_frame": None, "video_restart": False, "current_video": None, "mpv": mpv}
-    stop_event = threading.Event()
+    shared["mpv"] = mpv
 
     threads = [
-        threading.Thread(target=sync_loop,         args=(stop_event,),                                                   daemon=True, name="sync"),
-        threading.Thread(target=heartbeat_loop,    args=(shared, stop_event, sm),                                         daemon=True, name="heartbeat"),
-        threading.Thread(target=capture_thread_fn, args=(cap_live, marker1_small, marker2_small, shared, stop_event, sm), daemon=True, name="capture"),
-        threading.Thread(target=video_thread_fn,   args=(shared, stop_event, sm),                                         daemon=True, name="video"),
-        threading.Thread(target=sender_loop,       args=(stop_event,),                                                   daemon=True, name="playback"),
+        threading.Thread(target=capture_thread_fn,
+                         args=(cap_live, marker1_small, marker2_small, shared, stop_event, sm),
+                         kwargs={"reopen": reopen_capture},
+                         daemon=True, name="capture"),
+        threading.Thread(target=video_thread_fn,   args=(shared, stop_event, sm), daemon=True, name="video"),
+        threading.Thread(target=sender_loop,       args=(stop_event,),            daemon=True, name="playback"),
     ]
     for t in threads:
         t.start()
@@ -144,7 +213,10 @@ def main():
         except Exception as e:
             print(f"[PLAYBACK] финальная отправка не удалась: {e}")
         mpv.stop()
-        cap_live.release()
+        # Освобождаем именно текущее устройство: после переподключения на ходу
+        # capture_thread_fn кладёт в shared["cap"] новый объект, а локальная
+        # cap_live указывает на уже мёртвый.
+        (shared.get("cap") or cap_live).release()
         cv2.destroyAllWindows()
         print("Завершено.")
 

@@ -10,6 +10,22 @@ ENV_FILE="/etc/ilsport/env"
 INSTALL_DIR="${INSTALL_DIR:-/opt/ilsport/dart-ad}"
 MONITOR_X_OFFSET="${MONITOR_X_OFFSET:-1920}"
 LOG="$HOME/.ilsport-player.log"
+LOG_MAX_MB="${PLAYER_LOG_MAX_MB:-20}"
+
+# Ротация перед каждым запуском main.py. Без неё лог рос неограниченно:
+# на стенде без карты захвата агент падал и перезапускался каждые 5 секунд,
+# и один только перебор устройств давал ~28 МБ варнингов OpenCV в сутки.
+# Держим одно поколение — .1 нужен ровно для того, чтобы разобрать причину
+# падения, случившегося прямо перед ротацией.
+rotate_log() {
+  [[ -f "$LOG" ]] || return 0
+  local bytes
+  bytes="$(stat -c %s "$LOG" 2>/dev/null || echo 0)"
+  if (( bytes / 1048576 >= LOG_MAX_MB )); then
+    mv -f "$LOG" "$LOG.1"
+    echo "[$(date -Iseconds)] лог превысил ${LOG_MAX_MB}M, предыдущий сохранён в $LOG.1" >> "$LOG"
+  fi
+}
 
 # --- ждём, пока поднимется DISPLAY ---
 for _ in $(seq 1 30); do
@@ -33,6 +49,7 @@ PIDFILE="/run/ilsport-dart-ad.pid"
 echo "[$(date -Iseconds)] kiosk-autostart up; INSTALL_DIR=$INSTALL_DIR offset=$MONITOR_X_OFFSET" >> "$LOG"
 
 while true; do
+  rotate_log
   cd "$INSTALL_DIR" || { echo "[$(date -Iseconds)] no $INSTALL_DIR" >> "$LOG"; sleep 10; continue; }
   python3 -u main.py "$MONITOR_X_OFFSET" >> "$LOG" 2>&1 &
   PID=$!
