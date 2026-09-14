@@ -107,6 +107,7 @@ def _wait_for_capture(shared, stop_event):
     """
     announced = False
     while not _shutdown.is_set() and not stop_event.is_set():
+        t0 = time.time()
         cap, _ = find_capture_device(skip_first=False)
         if cap is not None:
             _set_fault(shared, None)
@@ -114,8 +115,10 @@ def _wait_for_capture(shared, stop_event):
         if not announced:
             announced = True
             _set_fault(shared, FAULT_NO_CAPTURE, "устройство /dev/video* с картинкой не найдено")
-            print(f"[CAPTURE] карта захвата не найдена — жду, повтор каждые "
-                  f"{CAPTURE_RETRY_SEC:.0f}s (в дэшборде машина видна как error)")
+            # Время перебора важно: пока он идёт, первый heartbeat может уйти
+            # как idle. На Pi 5 без фильтра по QUERYCAP это были 40–80 с.
+            print(f"[CAPTURE] карта захвата не найдена (перебор занял {time.time() - t0:.1f}s) — "
+                  f"жду, повтор каждые {CAPTURE_RETRY_SEC:.0f}s (в дэшборде машина видна как error)")
         _shutdown.wait(CAPTURE_RETRY_SEC)
     return None
 

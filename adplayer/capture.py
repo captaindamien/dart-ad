@@ -69,7 +69,13 @@ def _looks_like_capture(path):
         return True
     if caps & (_V4L2_CAP_VIDEO_M2M | _V4L2_CAP_VIDEO_M2M_MPLANE):
         return False
-    return bool(caps & (_V4L2_CAP_VIDEO_CAPTURE | _V4L2_CAP_VIDEO_CAPTURE_MPLANE))
+    # Только одноплоскостной захват. Узлы pispbe-output* на Pi 5 отдают
+    # 0x4201000 = CAPTURE_MPLANE + STREAMING без бита M2M и проходили бы
+    # фильтр, а OpenCV на каждом висел до select() timeout. При этом V4L2-
+    # бэкенд OpenCV многоплоскостные узлы не поддерживает вовсе, так что
+    # требование VIDEO_CAPTURE — не ограничение, а точное условие пригодности.
+    # USB-карты захвата (UVC) отдают именно его.
+    return bool(caps & _V4L2_CAP_VIDEO_CAPTURE)
 
 
 def _video_indices():
