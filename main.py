@@ -3,7 +3,7 @@ ILSport Dart Ad Player — точка входа для продакшена.
 
 Логика:
   LIVE  → обнаружен marker.png  → воспроизводит рекламные видео из плейлиста
-  VIDEO → обнаружен marker2.png → возвращается к живому видео
+  VIDEO → обнаружена шапка меню (любой из public/exit/*.png) → возвращается к живому видео
 
 Рекламные видео декодируются и выводятся внешним процессом mpv с HW-ускорением
 (V4L2 M2M на Raspberry Pi 4). Live-картинка с карты захвата по-прежнему
@@ -56,7 +56,7 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 import cv2
 import numpy as np
 
-from adplayer.config import MARKER1_PATH, MARKER2_PATH, ADS_DIR, SERVER_URL, CAPTURE_RETRY_SEC
+from adplayer.config import MARKER1_PATH, ADS_DIR, SERVER_URL, CAPTURE_RETRY_SEC
 from adplayer.state import (
     StateManager, STATE_LIVE, STATE_VIDEO, FAULT_NO_CAPTURE, FAULT_NO_MARKERS,
 )
@@ -154,11 +154,11 @@ def main():
         pass
 
     try:
-        marker1_small, marker2_small = load_markers(MARKER1_PATH, MARKER2_PATH)
+        marker1_small, exit_markers = load_markers(MARKER1_PATH)
     except FileNotFoundError as e:
         # Без маркеров агент бесполезен, но исчезнувшая из дэшборда машина хуже,
         # чем машина в состоянии error: во втором случае хотя бы видно, что чинить.
-        # Файлы вернёт ближайший ilsport-update (git reset --hard), после чего
+        # Файлы (marker.png, public/exit/*.png) вернёт ближайший ilsport-update, после чего
         # kiosk-autostart перезапустит процесс.
         print(f"Ошибка: {e}")
         _set_fault(shared, FAULT_NO_MARKERS, str(e)[:200])
@@ -194,7 +194,7 @@ def main():
 
     threads = [
         threading.Thread(target=capture_thread_fn,
-                         args=(cap_live, marker1_small, marker2_small, shared, stop_event, sm),
+                         args=(cap_live, marker1_small, exit_markers, shared, stop_event, sm),
                          kwargs={"reopen": reopen_capture},
                          daemon=True, name="capture"),
         threading.Thread(target=video_thread_fn,   args=(shared, stop_event, sm), daemon=True, name="video"),

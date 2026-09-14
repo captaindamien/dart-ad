@@ -6,7 +6,7 @@ dev.py — локальная эмуляция без capture card и второ
 
 Клавиши:
   1       — симулировать marker1 (LIVE → VIDEO / запустить рекламу)
-  2       — симулировать marker2 (VIDEO → LIVE)
+  2       — симулировать шапку меню (VIDEO → LIVE)
   r       — сбросить в STATE_LIVE
   q / Esc — выход
 
@@ -19,7 +19,7 @@ dev.py — локальная эмуляция без capture card и второ
 идут в половинном разрешении и растягиваются до размера карты захвата на
 лету. Запись экрана работает и здесь: `touch ~/.cache/ilsport/record.request`.
 
-Без него dev-режим обходит capture_thread_fn стороной: путь marker2 → LIVE
+Без него dev-режим обходит capture_thread_fn стороной: путь шапка → LIVE
 не проверялся локально ни разу, из-за чего регрессия в частоте детекта и
 доехала до автоматов незамеченной.
 """
@@ -42,7 +42,7 @@ from adplayer.player import video_thread_fn
 from adplayer.playback import sender_loop
 from adplayer.capture import capture_thread_fn, load_markers
 from adplayer.config import (
-    ADS_DIR, MACHINE_TOKEN, SERVER_URL, MARKER1_PATH, MARKER2_PATH,
+    ADS_DIR, MACHINE_TOKEN, SERVER_URL, MARKER1_PATH,
     CAPTURE_WIDTH, CAPTURE_HEIGHT,
 )
 
@@ -311,7 +311,7 @@ def main():
         if not cap_live.isOpened():
             print(f"[DEV] не удалось открыть DEV_DETECT={DEV_DETECT}")
             sys.exit(1)
-        markers = load_markers(MARKER1_PATH, MARKER2_PATH)
+        markers = load_markers(MARKER1_PATH)
         print(f"[DEV] режим настоящей детекции: {DEV_DETECT} (клавиши 1/2 отключены)")
     else:
         cap_live = _make_live_source()

@@ -39,7 +39,7 @@ def _load_dotenv(path):
 
 _load_dotenv(os.path.join(_ROOT, ".env"))
 
-AGENT_VERSION      = "1.3.1"
+AGENT_VERSION      = "1.4.0"
 
 MACHINE_TOKEN      = os.environ.get("MACHINE_TOKEN", "")
 SERVER_URL         = os.environ.get("SERVER_URL", "http://localhost:3000").rstrip("/")
@@ -68,6 +68,14 @@ PLAYBACK_MIN_SEC = float(os.environ.get("PLAYBACK_MIN_SEC", "1.0"))
 
 _PUBLIC = os.path.join(_ROOT, "public")
 MARKER1_PATH = os.path.join(_PUBLIC, "marker.png")
+# Эталоны выхода из рекламы — все PNG из этого каталога. Шапка автомата
+# меняет цвет и состав по режиму (GAME SELECT, ONLINE MATCH, LEAGUE, экраны
+# настроек…), и один эталон покрывал только часть режимов: реклама не
+# заканчивалась до конца игры. Новый режим = положить в каталог полосу
+# шапки, вырезанную из записи экрана (tools/make_marker.py), и запушить.
+EXIT_MARKERS_DIR = os.path.join(_PUBLIC, "exit")
+# Старое имя единственного эталона — запасной вариант для checkout, где
+# каталога exit ещё нет.
 MARKER2_PATH = os.path.join(_PUBLIC, "marker2.png")
 
 # --- карта захвата ---
@@ -133,6 +141,17 @@ DETECT_SCALES = tuple(
 # MARKER_DEBUG показывает стабильные 0.65–0.74 на маркере, его можно опустить
 # через /etc/ilsport/env, не трогая основной.
 DETECT_TOLERANT_THRESHOLD = float(os.environ.get("DETECT_TOLERANT_THRESHOLD", str(THRESHOLD)))
+# Терпимый детектор для эталонов выхода — выключен. Замер на записи с
+# ilsport3 (14.09.2026, 729 кадров без шапки): основной детектор по любому
+# эталону выхода не поднимается выше 0.28, а терпимый на экране WARNING и
+# слайдах аттракта даёт 0.59–0.80 — выше порога, то есть ложный выход из
+# рекламы. Рассогласование масштаба между автоматами решается не им, а
+# эталонами, снятыми с самого автомата (public/exit/*_lite.png и т.п.).
+DETECT_TOLERANT_EXIT = os.environ.get("DETECT_TOLERANT_EXIT", "0") not in ("", "0", "false", "False")
+# Шапку ищем только в верхней доле кадра: она всегда сверху, а matchTemplate
+# по полному кадру для восьми эталонов на 7 fps — лишние ~20 мс на кадр.
+# 0.3 от 1080 = 324 px при полосе в 152 px: запас на сдвиг кадрирования есть.
+EXIT_SEARCH_BAND = float(os.environ.get("EXIT_SEARCH_BAND", "0.3"))
 
 # Предупреждение в лог и fault=ad_stuck в heartbeat, если реклама идёт дольше
 # этого без marker2. Само по себе — диагностика: состояние остаётся "playing".

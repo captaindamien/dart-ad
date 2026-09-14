@@ -4,8 +4,13 @@
 рабочей машине, не на Pi.
 
     python3 tools/rec_report.py ~/rec/20260914-171502 \
-        --templates public/marker2.png cand/online.png [--marker1 public/marker.png] \
+        [--templates public/exit/*.png cand/new.png] [--marker1 public/marker.png] \
         [--every 2] [--top 8] [--no-sheet] [--replay]
+
+По умолчанию эталоны — весь public/exit/. Отклик считается так же, как на
+автомате: основной детектор в верхней полосе кадра (EXIT_SEARCH_BAND);
+терпимый печатается справочно, в решении он участвует только при
+DETECT_TOLERANT_EXIT=1 (см. config.py, почему выключен).
 
 Что делает:
   * контактный лист снимков shots/ → <rec>/shots_sheet_N.jpg — по нему видно
@@ -20,7 +25,7 @@
   * marker1: максимум по всем кадрам — реклама не должна включаться посреди игры;
   * --replay: прогон записи через боевой capture_thread_fn на виртуальных
     часах (по временам из detect.csv), печатает каждый переход состояния и итог.
-    Эталон выхода в прогоне — первый из --templates.
+    Набор эталонов выхода в прогоне — все --templates.
 """
 
 import argparse
@@ -42,10 +47,11 @@ os.environ.setdefault("RECORD_ON_START_SEC", "0")
 
 from adplayer import capture, state as state_mod             # noqa: E402
 from adplayer.capture import (                                # noqa: E402
-    _marker_score, _prep_tolerant, _TolerantMatcher, _TOL_CORE,
+    _marker_score, _prep_tolerant, _TolerantMatcher, _core_for, exit_band,
 )
 from adplayer.config import (                                 # noqa: E402
-    DETECT_SCALE, THRESHOLD, DETECT_TOLERANT_THRESHOLD, CAPTURE_WIDTH, CAPTURE_HEIGHT,
+    DETECT_SCALE, THRESHOLD, DETECT_TOLERANT_THRESHOLD, DETECT_TOLERANT_EXIT,
+    CAPTURE_WIDTH, CAPTURE_HEIGHT, EXIT_MARKERS_DIR,
 )
 
 _SNAP_RE = re.compile(r"^(\d+)_t(\d+\.\d)_(\w+)\.png$")
@@ -53,15 +59,13 @@ _SNAP_RE = re.compile(r"^(\d+)_t(\d+\.\d)_(\w+)\.png$")
 _NEAR_POS_SEC = 1.5
 
 
-def _core_for(small):
-    h, w = small.shape
-    return _TOL_CORE[2] if h / w < 0.25 else _TOL_CORE[1]
-
-
 class Template:
-    def __init__(self, path):
+    """Эталон; is_exit — искать в верхней полосе, как на автомате, и решать по основному."""
+
+    def __init__(self, path, is_exit=True):
         self.path = path
         self.name = os.path.splitext(os.path.basename(path))[0]
+        self.is_exit = is_exit
         gray = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if gray is None:
             raise SystemExit(f"не читается эталон: {path}")
@@ -69,10 +73,15 @@ class Template:
         self.small = cv2.resize(gray, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
         self.tol   = _TolerantMatcher(self.small, *_core_for(self.small))
 
-    def score(self, gray_small, gray_tol):
-        primary = _marker_score(gray_small, self.small)
-        tol, scale = self.tol.score(gray_tol)
-        return primary, tol, scale
+    def score(self, prep):
+        """-> (best_по_правилам_автомата, primary, tol, scale)."""
+        gray, gray_tol, band, band_tol = prep
+        region, region_tol = (band, band_tol) if self.is_exit else (gray, gray_tol)
+        primary = _marker_score(region, self.small)
+        tol, scale = self.tol.score(region_tol)
+        use_tol = DETECT_TOLERANT_EXIT if self.is_exit else True
+        best = max(primary, tol) if use_tol else primary
+        return best, primary, tol, scale
 
 
 def _prep(frame):
@@ -80,7 +89,8 @@ def _prep(frame):
         frame = cv2.resize(frame, (CAPTURE_WIDTH, CAPTURE_HEIGHT), interpolation=cv2.INTER_LINEAR)
     small = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
     gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    return gray_small, _prep_tolerant(gray_small)
+    band = exit_band(gray_small)
+    return gray_small, _prep_tolerant(gray_small), band, _prep_tolerant(band)
 
 
 def _read_csv(rec):
@@ -169,10 +179,9 @@ def report(rec, templates, marker1, every, top):
     n = 0
     for src, label, rec_t, frame in iter_frames(rec, shots, every):
         n += 1
-        gs, gt = _prep(frame)
+        prep = _prep(frame)
         for t in templates:
-            primary, tol, scale = t.score(gs, gt)
-            best = max(primary, tol)
+            best, primary, tol, scale = t.score(prep)
             is_pos = (src == "shot" and label in labels[t.name])
             # Кадры рядом с положительным снимком — та же шапка, только не
             # размеченная (снимок на переходе состояния дублирует предыдущий,
@@ -185,11 +194,12 @@ def report(rec, templates, marker1, every, top):
             else:
                 scores[t.name]["neg"].append((best, primary, tol, scale, label, rec_t))
         if marker1 is not None:
-            p, tl, sc = marker1.score(gs, gt)
-            m1_all.append((max(p, tl), p, tl, sc, label, rec_t))
+            b, p, tl, sc = marker1.score(prep)
+            m1_all.append((b, p, tl, sc, label, rec_t))
 
     print(f"\nКадров проверено: {n} (снимков {len(shots)}, видео каждый {every}-й кадр)")
-    print(f"Порог: основной {THRESHOLD}, терпимый {DETECT_TOLERANT_THRESHOLD}\n")
+    print(f"Порог: основной {THRESHOLD}, терпимый {DETECT_TOLERANT_THRESHOLD}; "
+          f"для эталонов выхода терпимый {'включён' if DETECT_TOLERANT_EXIT else 'выключен — best = primary'}\n")
     for t in templates:
         pos = sorted(scores[t.name]["pos"], reverse=True)
         neg = sorted(scores[t.name]["neg"], reverse=True)
@@ -269,7 +279,7 @@ class _Source:
         self.cap.release()
 
 
-def replay(rec, marker1, exit_template):
+def replay(rec, marker1, exit_templates):
     clock = _Clock(0.0)
     capture.time = clock
     state_mod.time = clock
@@ -286,7 +296,8 @@ def replay(rec, marker1, exit_template):
     src = _Source(rec, clock, stop_event)
     shared = {"live_frame": None, "video_restart": False, "current_video": None, "fault": None}
     print("Прогон записи через capture_thread_fn (виртуальные часы):")
-    capture.capture_thread_fn(src, marker1.small, exit_template.small, shared, stop_event, sm)
+    capture.capture_thread_fn(src, marker1.small, [(t.name, t.small) for t in exit_templates],
+                              shared, stop_event, sm)
     exits = sum(1 for t in transitions if t[2] == state_mod.STATE_LIVE)
     print(f"Итого: {len(transitions)} переходов, {exits} выходов из рекламы, "
           f"{len(transitions) - exits} входов; длительность записи {clock.t:.0f}s")
@@ -295,7 +306,7 @@ def replay(rec, marker1, exit_template):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("rec")
-    ap.add_argument("--templates", nargs="+", default=[os.path.join(_ROOT, "public", "marker2.png")])
+    ap.add_argument("--templates", nargs="+", default=sorted(glob.glob(os.path.join(EXIT_MARKERS_DIR, "*.png"))))
     ap.add_argument("--marker1", default=os.path.join(_ROOT, "public", "marker.png"))
     ap.add_argument("--every", type=int, default=1, help="каждый N-й кадр видео")
     ap.add_argument("--top", type=int, default=8)
@@ -304,7 +315,7 @@ def main():
     a = ap.parse_args()
 
     templates = [Template(p) for p in a.templates]
-    marker1 = Template(a.marker1) if a.marker1 and os.path.exists(a.marker1) else None
+    marker1 = Template(a.marker1, is_exit=False) if a.marker1 and os.path.exists(a.marker1) else None
 
     if not a.no_sheet:
         shots = sorted(glob.glob(os.path.join(a.rec, "shots", "*.png")))
@@ -314,7 +325,7 @@ def main():
     if a.replay:
         if marker1 is None:
             raise SystemExit("--replay требует --marker1")
-        replay(a.rec, marker1, templates[0])
+        replay(a.rec, marker1, templates)
 
 
 if __name__ == "__main__":
