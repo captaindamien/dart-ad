@@ -32,6 +32,10 @@ ILSport Dart Ad Player — точка входа для продакшена.
   PLAYBACK_BATCH_SIZE     — размер пачки (100, сервер принимает до 200)
   PLAYBACK_QUEUE_MAX      — потолок очереди в событиях (20000)
   PLAYBACK_MIN_SEC        — показ короче этого не засчитывается (1.0)
+  RECORD_ON_START_SEC     — записать экран с первого кадра столько секунд (0 — выкл.).
+                            Обычный способ — без перезапуска, файлом-запросом:
+                            `touch ~/.cache/ilsport/record.request`, см. adplayer/recorder.py
+  REC_DIR, REC_MAX_MB, REC_FPS, REC_KEEP … — параметры записи (adplayer/config.py)
 
 Запуск:
   python main.py [X_offset]

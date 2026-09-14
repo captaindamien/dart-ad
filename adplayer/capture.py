@@ -15,6 +15,7 @@ from .config import (
     CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_RETRY_SEC, CAPTURE_STALL_SEC,
 )
 from .state import STATE_LIVE, STATE_VIDEO, FAULT_CAPTURE_LOST, FAULT_AD_STUCK
+from .recorder import Recorder
 
 # OpenCV сначала пробует GStreamer, и каждая неудачная попытка открыть
 # устройство печатает в stderr по четыре строки варнингов. Пока агент ждёт
@@ -355,8 +356,15 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
       * STUCK_EXIT_SEC — выключенный по умолчанию аварийный рубильник.
     Без роликов в плейлисте рекламный режим не включается вовсе, а если
     плейлист опустел посреди рекламы — возвращаемся в трансляцию.
+
+    Здесь же живёт запись экрана (Recorder): по файлу-запросу пишет видео,
+    снимки и отклики детектора — из них подбираются эталоны для режимов
+    автомата, которых нынешний marker2 не знает. Пока идёт запись, оба
+    маркера считаются на каждом кадре независимо от состояния: шапка нужна в
+    CSV и в LIVE, а лишний matchTemplate стоит копейки и только на время записи.
     """
     det            = _Detector(marker1_small, marker2_small)
+    rec            = Recorder()
     frame_count    = 0
     deb_live       = _Debouncer()   # ждём marker1, чтобы уйти в рекламу
     deb_video      = _Debouncer()   # ждём marker2, чтобы вернуться к трансляции
@@ -378,6 +386,7 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
     last_stuck_rep = 0.0
     m2_session_max = 0.0
     missed_marker2 = 0
+    rec_transitions = sm.transitions   # снимок на каждом переходе состояния
 
     def leave_video_diag():
         nonlocal stuck_warned, last_stuck_rep, m2_session_max, missed_marker2
@@ -445,10 +454,11 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
         in_live = sm.state == STATE_LIVE
         in_video_for = 0.0 if in_live else sm.time_in_state()
 
+        t_det = time.perf_counter()
         det.prepare(gray_small)
         if in_live:
             r1 = det.score(1)
-            r2 = None
+            r2 = det.score(2) if rec.active else None
         else:
             r2 = det.score(2)
             m2_session_max = max(m2_session_max, r2[1], r2[2])
@@ -457,9 +467,19 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
             r1 = det.score(1, quick=True)
         hit1 = r1[0]
         hit2 = r2[0] if r2 is not None else False
+        det_ms = (time.perf_counter() - t_det) * 1000.0
 
         if dbg is not None and dbg.due(now):
             dbg.flush(now, sm.state, r1, r2 if r2 is not None else det.score(2), gap)
+
+        # Запись экрана: запрос проверяется раз в секунду, кадр уходит в
+        # запись до любых `continue` ниже, чтобы CSV покрывал каждый кадр.
+        rec.poll(now)
+        if rec.active:
+            rec.feed(now, frame, gray_small, sm.state, in_video_for, interval, gap, det_ms,
+                     r1, r2 if r2 is not None else (False, 0.0, 0.0, 1.0), hit1, hit2,
+                     forced_snapshot=(sm.transitions != rec_transitions))
+            rec_transitions = sm.transitions
 
         # --- диагностика и аварийный выход из залипшей рекламы -----------------
         if not in_live and in_video_for > STUCK_WARN_SEC:
@@ -547,3 +567,5 @@ def capture_thread_fn(cap_live, marker1_small, marker2_small, shared, stop_event
             deb_rearm.reset()
             if not hit1:
                 rearm_armed = True
+
+    rec.stop("shutdown")

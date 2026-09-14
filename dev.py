@@ -15,6 +15,10 @@ dev.py — локальная эмуляция без capture card и второ
   DEV_DETECT=0 python3 dev.py                  — камера/карта захвата по номеру
   MARKER_DEBUG=1 ...                           — печатать fps и отклики маркеров
 
+Записи агента (~/.cache/ilsport/rec/<ts>/screen.avi, см. adplayer/recorder.py)
+идут в половинном разрешении и растягиваются до размера карты захвата на
+лету. Запись экрана работает и здесь: `touch ~/.cache/ilsport/record.request`.
+
 Без него dev-режим обходит capture_thread_fn стороной: путь marker2 → LIVE
 не проверялся локально ни разу, из-за чего регрессия в частоте детекта и
 доехала до автоматов незамеченной.
@@ -39,6 +43,7 @@ from adplayer.playback import sender_loop
 from adplayer.capture import capture_thread_fn, load_markers
 from adplayer.config import (
     ADS_DIR, MACHINE_TOKEN, SERVER_URL, MARKER1_PATH, MARKER2_PATH,
+    CAPTURE_WIDTH, CAPTURE_HEIGHT,
 )
 
 # Опционально: путь к видеофайлу для имитации «живого» источника.
@@ -208,6 +213,14 @@ class _LoopingCapture:
         if not ret:
             self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self._cap.read()
+        # Записи с автомата (screen.avi из Recorder) идут в половинном
+        # разрешении; шаблоны маркеров сняты с 1920x1080, и на кадре
+        # 960x540 после DETECT_SCALE они просто не поместятся. Растягиваем
+        # до разрешения карты захвата — для детекта на 0.25 это те же пиксели.
+        if ret and frame is not None and (frame.shape[1] < CAPTURE_WIDTH or
+                                          frame.shape[0] < CAPTURE_HEIGHT):
+            frame = cv2.resize(frame, (CAPTURE_WIDTH, CAPTURE_HEIGHT),
+                               interpolation=cv2.INTER_LINEAR)
         return ret, frame
 
     def set(self, *args):

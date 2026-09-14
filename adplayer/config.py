@@ -39,7 +39,7 @@ def _load_dotenv(path):
 
 _load_dotenv(os.path.join(_ROOT, ".env"))
 
-AGENT_VERSION      = "1.3.0"
+AGENT_VERSION      = "1.3.1"
 
 MACHINE_TOKEN      = os.environ.get("MACHINE_TOKEN", "")
 SERVER_URL         = os.environ.get("SERVER_URL", "http://localhost:3000").rstrip("/")
@@ -143,3 +143,41 @@ STUCK_WARN_SEC = float(os.environ.get("STUCK_WARN_SEC", "300"))
 # как аварийный рубильник для конкретного автомата (/etc/ilsport/env),
 # включать — только осознанным решением.
 STUCK_EXIT_SEC = float(os.environ.get("STUCK_EXIT_SEC", "0"))
+
+# --- запись экрана для подбора маркеров -------------------------------------
+# Агент держит /dev/videoN монопольно, снаружи (ffmpeg) карту захвата не
+# открыть, поэтому запись живёт внутри потока детекта. Запускается без
+# перезапуска плеера: `touch ~/.cache/ilsport/record.request` (в файле можно
+# указать длительность в секундах; `stop` — остановить). Файл одноразовый:
+# агент удаляет его сразу после прочтения. Подробности — raspberry-pi-setup/README.md.
+_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "ilsport")
+REC_DIR          = os.environ.get("REC_DIR", os.path.join(_CACHE_DIR, "rec"))
+REC_REQUEST_PATH = os.environ.get("REC_REQUEST_PATH", os.path.join(_CACHE_DIR, "record.request"))
+# Начать запись сразу при старте агента (секунды, 0 — выключено). Срабатывает
+# при каждом перезапуске, пока стоит в /etc/ilsport/env, — для разовых замеров
+# удобнее файл-запрос.
+RECORD_ON_START_SEC = float(os.environ.get("RECORD_ON_START_SEC", "0"))
+REC_DEFAULT_SEC = float(os.environ.get("REC_DEFAULT_SEC", "900"))
+REC_MAX_SEC     = float(os.environ.get("REC_MAX_SEC", "3600"))
+# Потолок одной записи на диске (видео + снимки): SD-карта не резиновая.
+REC_MAX_MB      = float(os.environ.get("REC_MAX_MB", "1500"))
+# Видео пишется в половинном разрешении: детект работает на DETECT_SCALE=0.25
+# от кадра (480x270), и кадр 960x540, растянутый обратно, даёт те же 480x270.
+# Для прогона через DEV_DETECT ничего не теряется, а размер падает вчетверо.
+# Полное разрешение нужно только эталонам — для них PNG-снимки.
+REC_FPS         = float(os.environ.get("REC_FPS", "5"))
+REC_VIDEO_SCALE = float(os.environ.get("REC_VIDEO_SCALE", "0.5"))
+REC_QUALITY     = int(os.environ.get("REC_QUALITY", "75"))
+# Снимок полного кадра (PNG, без потерь) — когда экран сменился (средняя
+# разница с последним снимком больше REC_SNAP_DIFF по шкале 0..255) и уже
+# устоялся (разница с предыдущим кадром меньше REC_SNAP_SETTLE): иначе в
+# эталон попадёт середина анимации перехода.
+REC_SNAP_DIFF    = float(os.environ.get("REC_SNAP_DIFF", "8"))
+REC_SNAP_SETTLE  = float(os.environ.get("REC_SNAP_SETTLE", "3"))
+REC_SNAP_MIN_GAP = float(os.environ.get("REC_SNAP_MIN_GAP", "0.5"))
+REC_SNAP_MAX     = int(os.environ.get("REC_SNAP_MAX", "600"))
+# Кодирование PNG 1080p на Pi занимает 50–100 мс — пишет отдельный поток через
+# ограниченную очередь; при переполнении кадр отбрасывается, детект не ждёт.
+REC_QUEUE_MAX = int(os.environ.get("REC_QUEUE_MAX", "8"))
+# Сколько последних записей хранить; старые удаляются при старте новой.
+REC_KEEP      = int(os.environ.get("REC_KEEP", "3"))
